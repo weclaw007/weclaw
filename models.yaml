@@ -1,0 +1,96 @@
+
+# ============================================================
+# 模型配置文件
+# ============================================================
+# 每个模型配置项的字段说明：
+#   provider     - langchain 的 model_provider（如 openai, anthropic, google_genai, ollama）
+#   model        - 实际模型名称
+#   base_url     - API 地址（可选，OpenAI 兼容协议的厂商需要配置）
+#   api_key_env  - 对应 .env 中的 API Key 环境变量名（可选，Ollama 不需要）
+#
+# 注意：
+#   - 阿里云 DashScope、DeepSeek、零一万物 等 OpenAI 兼容协议的厂商，provider 统一用 "openai"
+#   - Ollama 本地模型会自动发现，无需在此手动配置（但也可以手动指定）
+#   - API Key 敏感信息只在 .env 文件中配置，这里只引用环境变量名
+# ============================================================
+
+models:
+  # ── 阿里云 DashScope（OpenAI 兼容协议）──
+  qwen-plus:
+    provider: openai
+    model: qwen-plus-2025-07-28
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+
+  qwen-turbo:
+    provider: openai
+    model: qwen-turbo-latest
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+
+  qwen-max:
+    provider: openai
+    model: qwen-max-latest
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+
+  qwen-vl:
+    provider: openai
+    model: qwen-vl-plus-latest
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+
+  # ── OpenAI ──
+  gpt-4o:
+    provider: openai
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+
+  gpt-4o-mini:
+    provider: openai
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+
+  # ── Anthropic (Claude) ──
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    api_key_env: ANTHROPIC_API_KEY
+
+  claude-haiku:
+    provider: anthropic
+    model: claude-3-5-haiku-20241022
+    api_key_env: ANTHROPIC_API_KEY
+
+  # ── Google Gemini ──
+  gemini-flash:
+    provider: google_genai
+    model: gemini-2.5-flash
+    api_key_env: GOOGLE_API_KEY
+
+  gemini-pro:
+    provider: google_genai
+    model: gemini-2.5-pro
+    api_key_env: GOOGLE_API_KEY
+
+  # ── DeepSeek（OpenAI 兼容协议）──
+  deepseek-chat:
+    provider: openai
+    model: deepseek-chat
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+
+  deepseek-reasoner:
+    provider: openai
+    model: deepseek-reasoner
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+
+# 默认使用的模型（对应上面的 key）
+default: qwen-vl
+
+# Ollama 配置（自动发现本地模型时使用）
+ollama:
+  host: http://localhost:11434
+  # 设为 true 时自动发现本地 Ollama 模型并注册
+  auto_discover: true

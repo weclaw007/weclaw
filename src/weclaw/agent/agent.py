@@ -10,13 +10,13 @@ from typing import Any, AsyncIterator, Dict, Union
 
 import aiosqlite
 from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessageChunk
 from langchain_core.tools import BaseTool, tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from weclaw.agent.skill_manager import SkillManager
 from weclaw.utils.context_optimizer import summarize_text, trim_old_rounds
+from weclaw.utils.model_registry import ModelRegistry
 from weclaw.utils.paths import get_checkpoint_db_path
 
 logger = logging.getLogger(__name__)
@@ -169,41 +169,43 @@ class Agent:
     async def init(
         self,
         system_prompt: str,
-        model: str | None = None,
-        provide: str | None = None,
-        base_url: str | None = None,
+        model_name: str | None = None,
         custom_tools: list[BaseTool] | None = None,
         request_timeout: int = 120,
         session_id: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """初始化底层模型与 agent。"""
+        """初始化底层模型与 agent。
+
+        Args:
+            system_prompt: 系统提示词
+            model_name: 模型配置名（对应 models.yaml 中的 key），为 None 时使用默认模型
+            custom_tools: 自定义工具列表
+            request_timeout: 请求超时时间（秒）
+            session_id: 会话 ID，用于持久化检查点
+        """
         # 如果已有旧连接，先关闭防止泄漏
         if self._db_conn is not None:
             await self._db_conn.close()
             self._db_conn = None
 
-        # 优先级：显式参数 > 环境变量 > 代码默认值。
-        resolved_model = model or os.getenv("LLM_MODEL")
-        resolved_provide = provide or os.getenv("LLM_PROVIDER")
-        resolved_base_url = base_url or os.getenv("BASE_URL")
-
-        llm = init_chat_model(
-            model=resolved_model,
-            model_provider=resolved_provide,
-            api_key=os.getenv("DASHSCOPE_API_KEY"),
-            base_url=resolved_base_url,
+        # 通过 ModelRegistry 创建 LLM 实例
+        registry = ModelRegistry.get_instance()
+        llm = registry.create_chat_model(
+            name=model_name,
             request_timeout=request_timeout,
             stream_usage=True,
         )
 
-        # 使用 SQLite 持久化对话检查点
-        db_path = get_checkpoint_db_path()
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        # session_id 默认为 "main"，每个 session 独立目录
+        resolved_session_id = session_id or "main"
+
+        # 使用 SQLite 持久化对话检查点（按 session 隔离）
+        db_path = get_checkpoint_db_path(resolved_session_id)
         self._db_conn = await aiosqlite.connect(db_path)
         checkpoint = AsyncSqliteSaver(self._db_conn)
         await checkpoint.setup()  # 初始化数据库表结构
-        self.config = {"configurable": {"thread_id": session_id or str(uuid.uuid4())}}
+        self.config = {"configurable": {"thread_id": resolved_session_id}}
 
         # 默认注入系统工具，支持调用方追加自定义工具。
         tools = [run_command, read_local_file, read_skill, *(custom_tools or [])]
@@ -446,7 +448,8 @@ async def main():
     system_prompt = "\n".join(prompt_lines)
 
     async with Agent() as agent:
-        await agent.init(system_prompt=system_prompt, request_timeout=10000)
+        #await agent.init(system_prompt=system_prompt, model_name="ollama/qwen3.5:9b", request_timeout=10000)
+        await agent.init(system_prompt=system_prompt, model_name="qwen-vl", request_timeout=10000)
         print("=" * 50)
         print("多轮对话测试（输入 exit/quit 退出，Ctrl+C 中断）")
         print("=" * 50)

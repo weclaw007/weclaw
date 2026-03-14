@@ -41,6 +41,7 @@ class Client:
         self._closed = False
         self.agent: Agent | None = None
         self.inject_prompt: str = ""
+        self.model_name: str | None = None  # 当前使用的模型配置名
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self._tasks: set[asyncio.Task] = set()  # 跟踪所有 create_task 创建的任务
         logger.info(f"新客户端连接: {websocket.remote_address}")
@@ -78,7 +79,11 @@ class Client:
 
             # 初始化 Agent
             self.agent = Agent()
-            await self.agent.init(system_prompt=system_prompt, custom_tools=[message])
+            await self.agent.init(
+                system_prompt=system_prompt,
+                model_name=self.model_name,
+                custom_tools=[message],
+            )
             logger.info("Agent 初始化成功")
         except Exception as e:
             logger.exception("初始化 Agent 失败")
@@ -185,9 +190,11 @@ class Client:
         skills = skill_manager.get_skills_for_current_os()
         skills_json = []
         for skill, value in skills.items():
+            env_name = value.get("metadata", {}).get("openclaw", {}).get("primaryEnv", "")
             skill_json = {"name": value["name"], "description": value["description"],
                           "emoji": value.get("metadata", {}).get("openclaw", {}).get("emoji", ""),
-                          "primaryEnv": os.getenv(value.get("metadata", {}).get("openclaw", {}).get("primaryEnv", "")),
+                          "primaryEnv": os.getenv(env_name) if env_name else "",
+                          "envName": env_name,
                           "enabled": skill_manager.is_skill_enabled(skill),
                           "builtin": value.get("_builtin", True)}
 
@@ -284,6 +291,63 @@ class Client:
             }, ensure_ascii=False)
         await self.websocket.send(response)
 
+    async def handle_switch_model_message(self, message: dict) -> None:
+        """处理切换模型消息：销毁旧 Agent，下次对话时用新模型重新初始化"""
+        model_name = message.get("model_name", "")
+        message_id = message.get("id", "")
+
+        try:
+            self.model_name = model_name if model_name else None
+            # 关闭旧 Agent，下次 handle_user_message 时会重新初始化
+            if self.agent is not None:
+                await self.agent.close()
+                self.agent = None
+
+            logger.info(f"模型已切换为: {model_name or '默认'}")
+            response = json.dumps({
+                "id": message_id, "type": "system",
+                "action": "switch_model",
+                "model_name": model_name,
+                "success": True,
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.exception(f"切换模型失败: {e}")
+            response = json.dumps({
+                "id": message_id, "type": "system",
+                "action": "switch_model",
+                "success": False,
+                "error": str(e),
+            }, ensure_ascii=False)
+        await self.websocket.send(response)
+
+    async def handle_get_models_message(self, message: dict) -> None:
+        """处理获取可用模型列表消息"""
+        from weclaw.utils.model_registry import ModelRegistry
+
+        message_id = message.get("id", "")
+        try:
+            registry = ModelRegistry.get_instance()
+            models = registry.list_available()
+            default_model = registry.get_default()
+            current_model = self.model_name or default_model
+
+            response = json.dumps({
+                "id": message_id, "type": "system",
+                "action": "get_models",
+                "models": models,
+                "default": default_model,
+                "current": current_model,
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.exception(f"获取模型列表失败: {e}")
+            response = json.dumps({
+                "id": message_id, "type": "system",
+                "action": "get_models",
+                "models": [],
+                "error": str(e),
+            }, ensure_ascii=False)
+        await self.websocket.send(response)
+
     async def handle_system_message(self, message: dict) -> None:
         action = message.get("action", "")
         match action:
@@ -298,6 +362,10 @@ class Client:
                 await self.handle_disable_skill_message(message)
             case "save_api_key":
                 await self.handle_save_api_key_message(message)
+            case "switch_model":
+                await self.handle_switch_model_message(message)
+            case "get_models":
+                await self.handle_get_models_message(message)
             case _:
                 pass
 

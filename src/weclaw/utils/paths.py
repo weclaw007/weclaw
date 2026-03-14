@@ -17,15 +17,35 @@ def get_data_dir() -> Path:
     return data_dir
 
 
-def get_checkpoint_db_path() -> str:
-    """获取 checkpoint 数据库文件路径。
+def get_session_dir(session_id: str = "main") -> Path:
+    """获取指定会话的数据目录。
 
-    默认为 <data_dir>/checkpoint.db。
+    默认为 <data_dir>/sessions/<session_id>。
+    如果目录不存在会自动创建。
+
+    Args:
+        session_id: 会话 ID，默认为 "main"
+
+    Returns:
+        Path: 会话数据目录的绝对路径
+    """
+    session_dir = get_data_dir() / "sessions" / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
+
+
+def get_checkpoint_db_path(session_id: str = "main") -> str:
+    """获取指定会话的 checkpoint 数据库文件路径。
+
+    默认为 <data_dir>/sessions/<session_id>/checkpoint.db。
+
+    Args:
+        session_id: 会话 ID，默认为 "main"
 
     Returns:
         str: checkpoint 数据库文件的绝对路径字符串
     """
-    return str(get_data_dir() / "checkpoint.db")
+    return str(get_session_dir(session_id) / "checkpoint.db")
 
 
 def get_third_party_skills_dir() -> Path:
