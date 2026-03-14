@@ -1,0 +1,70 @@
+"""终端输出工具 - 统一的彩色打印和格式化输出"""
+
+# ── 终端颜色常量 ──
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+
+def colorize(text: str, color: str) -> str:
+    """给文本包裹颜色"""
+    return f"{color}{text}{RESET}"
+
+
+def print_section(title: str) -> None:
+    """打印分隔标题"""
+    print(f"\n{BOLD}{CYAN}{'═' * 60}")
+    print(f"  {title}")
+    print(f"{'═' * 60}{RESET}")
+
+
+def print_success(msg: str) -> None:
+    """打印绿色成功消息"""
+    print(f"  {GREEN}✔ {msg}{RESET}")
+
+
+def print_fail(msg: str) -> None:
+    """打印红色失败消息"""
+    print(f"  {RED}✘ {msg}{RESET}")
+
+
+def print_info(msg: str) -> None:
+    """打印青色信息消息"""
+    print(f"  {CYAN}ℹ {msg}{RESET}")
+
+
+def print_warn(msg: str) -> None:
+    """打印黄色警告消息"""
+    print(f"  {YELLOW}⚠ {msg}{RESET}")
+
+
+def print_detail(msg: str) -> None:
+    """打印灰色缩进的细节信息"""
+    print(f"    {DIM}{msg}{RESET}")
+
+
+def print_step(msg: str) -> None:
+    """打印步骤信息"""
+    print(f"  {CYAN}→{RESET} {msg}")
+
+
+def format_duration(seconds: float) -> str:
+    """格式化耗时显示
+
+    Args:
+        seconds: 秒数
+
+    Returns:
+        格式化后的时间字符串，如 "120ms"、"3.2s"、"2m30s"
+    """
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    elif seconds < 60:
+        return f"{seconds:.1f}s"
+    else:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}m{s}s"

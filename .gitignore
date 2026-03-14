@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.jbeval/
+.vscode/
+*.swp
+*.swo
+
+# 环境变量
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Node.js
+node_modules/
+package-lock.json
+
+# 数据文件
+*.db
+
+# 旧的子目录虚拟环境和配置（迁移后可删除）
+agent/.venv/
+agent/.env
+agent/node_modules/
+server/.venv/
