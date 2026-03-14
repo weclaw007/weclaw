@@ -1,6 +1,9 @@
 # Weclaw
 
 Weclaw is a mini OpenClaw built on the Python LangChain framework. It is an easy-to-use personal assistant agent compatible with OpenClaw skills, suitable as a local/private prototype or a skill integration platform.
+![聊天页面](https://raw.githubusercontent.com/kkbig509/weclaw/main/chat.png "聊天页面")
+
+![技能页面](https://raw.githubusercontent.com/kkbig509/weclaw/main/skills.png "技能页面")
 
 ## 快速上手
 
