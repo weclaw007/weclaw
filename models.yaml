@@ -87,7 +87,7 @@ models:
     api_key_env: DEEPSEEK_API_KEY
 
 # 默认使用的模型（对应上面的 key）
-default: qwen-vl
+default: qwen-plus
 
 # Ollama 配置（自动发现本地模型时使用）
 ollama:

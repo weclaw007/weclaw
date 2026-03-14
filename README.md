@@ -38,9 +38,9 @@ python src/weclaw/agent/agent.py
 
 启动后即可在终端中直接与 agent 对话，输入 `exit` 或 `quit` 退出。
 
-5. 启动 agent：
+5. 启动服务：
 
-先在一个终端启动 agent：
+先在一个终端启动 agent（WebSocket 后端）：
 
 ```
 python -m weclaw.agent.main
@@ -55,28 +55,44 @@ WebSocket服务器启动中...
 ============================================================
 ```
 
-
-
-然后在另一个终端启动 server：
+然后在另一个终端启动 Web UI（Vue 前端）：
 
 ```
-python -m weclaw.server.server
+cd web
+npm install   # 首次启动需要安装依赖
+npm run dev
 
 
-* Running on local URL:  http://127.0.0.1:7860
-[2026-03-14 09:53:27,997] INFO httpx: HTTP Request: GET http://127.0.0.1:7860/gradio_api/startup-events "HTTP/1.1 200 OK"
-[2026-03-14 09:53:28,167] INFO httpx: HTTP Request: GET https://api.gradio.app/pkg-version "HTTP/1.1 200 OK"
-[2026-03-14 09:53:28,249] INFO httpx: HTTP Request: HEAD http://127.0.0.1:7860/ "HTTP/1.1 200 OK"
-* To create a public link, set `share=True` in `launch()`.
+  VITE v6.x.x  ready in xxx ms
+
+  ➜  Local:   http://localhost:3000/
+  ➜  Network: use --host to expose
 ```
 
-启动后通过浏览器打开本地对话页面（默认地址通常为 http://localhost:7860，具体端口请参见项目配置）。
+启动后通过浏览器打开 http://localhost:3000 即可进入对话页面。
+
+> 💡 Web UI 基于 Vue 3 + Element Plus + Vite 构建，通过 WebSocket 与后端 agent 通信。Vite 开发服务器已配置代理，会自动将 WebSocket 请求转发到 `ws://localhost:4567`。
+
+
+
+## Telegram Bot
+
+Weclaw 内置了 Telegram 机器人技能，你可以通过 Telegram 随时随地与 AI 助手对话。
+
+### 快速接入
+
+1. 在 Telegram 中搜索 **BotFather**，发送 `/newbot` 创建机器人，获取 Bot Token
+2. 将 Token 写入 `.env` 文件：`TELEGRAM_BOT_TOKEN=your-token-here`
+3. 启动 Weclaw 后，在网页 Chat 界面中输入"启动 telegram bot"即可
+
+> 📖 详细的创建步骤和使用说明请参阅 [Telegram Bot 使用指南](docs/telegram-bot.md)。
 
 ## 主要特性
 
 - 基于 LangChain 的 agent 结构，便于扩展与定制。
 - 与 OpenClaw skills 兼容，能复用现有技能集。
 - 轻量、易上手，默认无需复杂配置即可运行。
+- **Vue Web UI**：基于 Vue 3 + Element Plus 构建的现代化 Web 界面，支持聊天对话、技能管理等功能。
 - **多模型支持**：通过统一的 `models.yaml` 配置文件管理所有厂商大模型，在 UI 中一键切换。
 - **本地 Ollama 模型**：自动发现本地已安装的 Ollama 模型，无需额外配置即可使用。
 
@@ -134,9 +150,16 @@ ollama:
 - 点击 🔄 按钮刷新模型列表（如刚安装了新的 Ollama 模型）
 - 当前使用的模型会以 ⭐ 标记显示
 
+## 技术栈
+
+- **后端**：Python 3.12+、LangChain、WebSocket
+- **前端**：Vue 3、Element Plus、Vite、markdown-it
+- **通信**：WebSocket（前端通过 Vite 代理连接后端）
+
 ## 要求
 
 - Python 3.12+
+- Node.js 18+（用于 Web UI）
 - 使用远程 LLM 时，需配置相应的 API Key。打开仓库根目录的 `.env` 文件，按 `KEY=VALUE` 格式添加，例如：
 
 ```
