@@ -69,3 +69,19 @@ def get_config_file_path() -> Path:
     """
     return get_data_dir() / "config.yaml"
 
+
+def get_tool_archive_dir(session_id: str = "main") -> Path:
+    """获取指定会话的工具结果归档目录。
+
+    默认为 <data_dir>/sessions/<session_id>/tool_archive。
+    如果目录不存在会自动创建。
+
+    Args:
+        session_id: 会话 ID，默认为 "main"
+
+    Returns:
+        Path: 工具结果归档目录的绝对路径
+    """
+    archive_dir = get_session_dir(session_id) / "tool_archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    return archive_dir

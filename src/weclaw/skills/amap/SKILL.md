@@ -1,6 +1,6 @@
 ---
 name: amap
-description: 高德地图地理信息服务，支持地理编码、逆地理编码、IP定位、天气查询、路线规划（骑行、步行、驾车、公交）、距离测量、关键词搜索、周边搜索、地点详情等功能。使用 mcp_client.py 脚本调用。
+description: 高德地图地理信息服务，支持地理编码、逆地理编码、IP定位、天气查询、路线规划（骑行、步行、驾车、公交）、距离测量、关键词搜索、周边搜索、地点详情等功能。使用 weclaw.agent.mcp_client 模块调用。
 homepage: https://dashscope.aliyuncs.com/api/v1/mcps/amap-maps/sse
 metadata:
   {
@@ -15,7 +15,7 @@ metadata:
 
 # AMap 高德地图
 
-基于高德地图的地理信息服务，提供位置相关功能。通过 `mcp_client.py` 脚本调用远程服务。
+基于高德地图的地理信息服务，提供位置相关功能。通过 `python -m weclaw.agent.mcp_client` 调用远程服务。
 
 ## Available Tools
 
@@ -113,34 +113,30 @@ Python command compatibility (some machines use `python`, others use `python3`):
 PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 ```
 
-Load API key from environment variable:
-
-```python
-import os
-api_key = os.getenv("DASHSCOPE_API_KEY")
-```
-
 调用工具示例（以天气查询为例）：
 
+> **重要：`-u`（--base-url）和 `-k`（--api-key）是必填参数，每次调用都必须传递，不可省略。`-k` 传入的是环境变量名（而非变量值），程序会自动读取环境变量。**
+
 ```bash
-$PYTHON_CMD mcp_client.py \
+$PYTHON_CMD -m weclaw.agent.mcp_client \
   -u https://dashscope.aliyuncs.com/api/v1/mcps/amap-maps/sse \
-  -k $DASHSCOPE_API_KEY \
+  -k DASHSCOPE_API_KEY \
   call-tool maps_weather -a '{"city": "北京"}'
 ```
 
 ## Notes
 
 - 需要 DashScope API Key（环境变量 `DASHSCOPE_API_KEY`）
+- **每次调用必须同时提供 `-u`（base-url）和 `-k`（api-key，环境变量名）参数**
 - 坐标格式：`经度,纬度`（如 `116.397428,39.90923`）
 - 城市名称支持中文
 - 距离单位为米，坐标系使用 GCJ-02（国测局坐标系）
 - 注意 DashScope 配额限制
-- **无需安装任何额外 Python 包，直接使用 mcp_client.py 即可**
+- **无需安装任何额外 Python 包，直接使用 `python -m weclaw.agent.mcp_client` 即可**
 - 如果以上工具列表不满足需求，可使用 `list-tools` 命令获取所有可用工具：
   ```bash
-  $PYTHON_CMD mcp_client.py \
+  $PYTHON_CMD -m weclaw.agent.mcp_client \
     -u https://dashscope.aliyuncs.com/api/v1/mcps/amap-maps/sse \
-    -k $DASHSCOPE_API_KEY \
+    -k DASHSCOPE_API_KEY \
     list-tools
   ```

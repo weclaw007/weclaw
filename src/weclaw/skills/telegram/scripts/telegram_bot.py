@@ -5,9 +5,11 @@ import os
 import re
 import uuid
 import websockets
+from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import unicodedata
+from weclaw.utils.message import build_user_message, build_system_message
 
 # 配置日志
 logging.basicConfig(
@@ -143,26 +145,7 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
-def _build_user_message(message_id: str, text: str, **kwargs) -> dict:
-    """
-    构建 user 消息对象
-    
-    Args:
-        message_id: 消息唯一 ID
-        text: 消息文本内容
-        **kwargs: 其他业务相关字段，如 location、image 等
-    
-    Returns:
-        dict: 包含通用字段和业务字段的消息对象
-    """
-    request = {
-        "id": message_id,
-        "type": "user",
-        "text": text
-    }
-    # 合并其他业务字段
-    request.update(kwargs)
-    return request
+
 
 
 class TelegramBot:
@@ -181,6 +164,8 @@ class TelegramBot:
         self.websocket: websockets.WebSocketClientProtocol | None = None
         self._ws_task: asyncio.Task | None = None
         self._shutdown_event = asyncio.Event()
+        # 机器人是否处于停止状态（/stop 后为 True，/start 后恢复为 False）
+        self._stopped = False
         # 存储消息 ID 到 chat_id 的映射
         self._message_map: dict[str, int] = {}
         # 存储每个消息 ID 累积的响应内容
@@ -189,6 +174,14 @@ class TelegramBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理 /start 命令"""
         user = update.effective_user
+        if self._stopped:
+            self._stopped = False
+            logger.info(f"用户 {user.first_name} ({user.id}) 重新启动了机器人")
+            await update.message.reply_text(
+                f"欢迎回来 {user.first_name}！\n\n"
+                "机器人已重新启动，可以继续发送消息了。"
+            )
+            return
         await update.message.reply_text(
             f"你好 {user.first_name}！\n\n"
             "我是一个智能助手机器人。\n"
@@ -206,13 +199,21 @@ class TelegramBot:
         )
 
     async def stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """处理 /stop 命令"""
+        """处理 /stop 命令，进入停止状态，不再处理消息，直到收到 /start"""
         logger.info(f"收到停止命令，来自用户: {update.effective_user.id}")
-        await update.message.reply_text("机器人正在停止...")
-        self._shutdown_event.set()
+        self._stopped = True
+        await update.message.reply_text(
+            "机器人已停止接收消息。\n"
+            "发送 /start 可重新启动。"
+        )
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理普通文本消息"""
+        # 停止状态下不处理消息
+        if self._stopped:
+            await update.message.reply_text("机器人已停止，发送 /start 重新启动。")
+            return
+        
         user_message = update.message.text
         user = update.effective_user
         logger.info(f"收到消息来自 {user.first_name} ({user.id}): {user_message}")
@@ -231,7 +232,7 @@ class TelegramBot:
             self._message_map[message_id] = update.effective_chat.id
             
             # 构建消息格式
-            request = _build_user_message(message_id, user_message)
+            request = build_user_message(message_id, user_message)
             
             # 发送到 WebSocket 服务器
             await self.websocket.send(json.dumps(request, ensure_ascii=False))
@@ -243,6 +244,11 @@ class TelegramBot:
     
     async def handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理位置消息"""
+        # 停止状态下不处理消息
+        if self._stopped:
+            await update.message.reply_text("机器人已停止，发送 /start 重新启动。")
+            return
+        
         location = update.message.location
         user = update.effective_user
         logger.info(f"收到位置消息来自 {user.first_name} ({user.id}): ({location.latitude}, {location.longitude})")
@@ -261,13 +267,9 @@ class TelegramBot:
             self._message_map[message_id] = update.effective_chat.id
             
             # 构建消息格式（包含位置信息）
-            request = _build_user_message(
+            request = build_user_message(
                 message_id,
                 f"用户发送了位置: 纬度 {location.latitude}, 经度 {location.longitude}",
-                location={
-                    "latitude": location.latitude,
-                    "longitude": location.longitude
-                }
             )
             
             # 发送到 WebSocket 服务器
@@ -284,92 +286,108 @@ class TelegramBot:
         logger.error(f"更新 {update} 导致错误 {context.error}")
     
     async def _websocket_receiver(self) -> None:
-        """WebSocket 消息接收循环"""
-        try:
-            logger.info(f"正在连接 WebSocket 服务器: {self.ws_url}")
-            async with websockets.connect(self.ws_url) as websocket:
-                self.websocket = websocket
-                logger.info("WebSocket 连接成功")
-                
-                async for message in websocket:
-                    try:
-                        # 解析 JSON 响应
-                        response = json.loads(message)
-                        message_id = response.get("id", "")
-                        msg_type = response.get("type", "")
-                        
-                        logger.info(f"[WebSocket 收到消息] ID={message_id}, type={msg_type}")
-                        
-                        # 检查消息 ID 是否存在映射
-                        if message_id not in self._message_map:
-                            logger.warning(f"未找到消息 ID 映射: {message_id}")
-                            continue
-                        
-                        chat_id = self._message_map[message_id]
-                        
-                        if msg_type == "start":
-                            # 开始接收，初始化缓冲区
-                            self._response_buffer[message_id] = ""
-                            
-                        elif msg_type == "chunk":
-                            # 累积响应片段
-                            chunk = response.get("chunk", "")
-                            if message_id not in self._response_buffer:
-                                self._response_buffer[message_id] = ""
-                            self._response_buffer[message_id] += chunk
-                            
-                        elif msg_type == "end":
-                            # 结束，发送完整响应
-                            full_response = _markdown_to_telegram_html(self._response_buffer.get(message_id, ""))
-                            if full_response:
-                                await self.application.bot.send_message(
-                                    chat_id=chat_id,
-                                    text=full_response,
-                                    parse_mode="HTML"
-                                )
-                                logger.info(f"已发送完整响应给用户 {chat_id}")
-                            else:
-                                await self.application.bot.send_message(
-                                    chat_id=chat_id,
-                                    text="(无响应内容)"
-                                )
-                            
-                            # 清理缓存
-                            self._response_buffer.pop(message_id, None)
-                            self._message_map.pop(message_id, None)
-                            
-                        elif msg_type == "error":
-                            # 错误响应
-                            error_msg = response.get("error", "未知错误")
-                            await self.application.bot.send_message(
-                                chat_id=chat_id,
-                                text=f"❌ 错误: {error_msg}"
-                            )
-                            logger.error(f"处理消息 {message_id} 时出错: {error_msg}")
-                            
-                            # 清理缓存
-                            self._response_buffer.pop(message_id, None)
-                            self._message_map.pop(message_id, None)
-                            
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON 解析失败: {e}, 原始消息: {message}")
-                    except Exception as e:
-                        logger.exception(f"处理 WebSocket 消息时出错: {e}")
-                
-                # async for 循环正常结束（服务器关闭连接）
-                logger.info("WebSocket 连接已正常关闭")
-                self._shutdown_event.set()
+        """WebSocket 消息接收循环，支持断线自动重连"""
+        while not self._shutdown_event.is_set():
+            try:
+                logger.info(f"正在连接 WebSocket 服务器: {self.ws_url}")
+                async with websockets.connect(self.ws_url) as websocket:
+                    self.websocket = websocket
+                    logger.info("WebSocket 连接成功")
+                    # 注入系统提示词,读取 SKILL.md 文件
+                    skill_md_path = Path(__file__).parent.parent / "SKILL.md"
+                    with open(skill_md_path, "r", encoding="utf-8") as f:
+                        prompt = f.read()
+
+                    await self.websocket.send(json.dumps(build_system_message(
+                        action = "prompt",
+                        text = prompt
+                    )))
                     
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket 连接已关闭")
-            # WebSocket 断开时，触发机器人停止
-            self._shutdown_event.set()
-        except Exception as e:
-            logger.exception(f"WebSocket 连接错误: {e}")
-            # WebSocket 异常时，触发机器人停止
-            self._shutdown_event.set()
-        finally:
-            self.websocket = None
+                    async for message in websocket:
+                        try:
+                            # 解析 JSON 响应
+                            response = json.loads(message)
+                            message_id = response.get("id", "")
+                            msg_type = response.get("type", "")
+                            
+                            logger.info(f"[WebSocket 收到消息] ID={message_id}, type={msg_type}")
+                            
+                            # 检查消息 ID 是否存在映射
+                            if message_id not in self._message_map:
+                                logger.warning(f"未找到消息 ID 映射: {message_id}")
+                                continue
+                            
+                            chat_id = self._message_map[message_id]
+                            
+                            if msg_type == "start":
+                                # 开始接收，初始化缓冲区
+                                self._response_buffer[message_id] = ""
+                                
+                            elif msg_type == "chunk":
+                                # 累积响应片段
+                                chunk = response.get("chunk", "")
+                                if message_id not in self._response_buffer:
+                                    self._response_buffer[message_id] = ""
+                                self._response_buffer[message_id] += chunk
+                                
+                            elif msg_type == "end":
+                                # 结束，发送完整响应
+                                full_response = _markdown_to_telegram_html(self._response_buffer.get(message_id, ""))
+                                if full_response:
+                                    await self.application.bot.send_message(
+                                        chat_id=chat_id,
+                                        text=full_response,
+                                        parse_mode="HTML"
+                                    )
+                                    logger.info(f"已发送完整响应给用户 {chat_id}")
+                                else:
+                                    await self.application.bot.send_message(
+                                        chat_id=chat_id,
+                                        text="(无响应内容)"
+                                    )
+                                
+                                # 清理缓存
+                                self._response_buffer.pop(message_id, None)
+                                self._message_map.pop(message_id, None)
+                                
+                            elif msg_type == "error":
+                                # 错误响应
+                                error_msg = response.get("error", "未知错误")
+                                await self.application.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"❌ 错误: {error_msg}"
+                                )
+                                logger.error(f"处理消息 {message_id} 时出错: {error_msg}")
+                                
+                                # 清理缓存
+                                self._response_buffer.pop(message_id, None)
+                                self._message_map.pop(message_id, None)
+                                
+                        except json.JSONDecodeError as e:
+                            logger.error(f"JSON 解析失败: {e}, 原始消息: {message}")
+                        except Exception as e:
+                            logger.exception(f"处理 WebSocket 消息时出错: {e}")
+                    
+                    # async for 循环正常结束（服务器主动关闭连接）
+                    logger.info("WebSocket 连接已被服务器关闭")
+                        
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("WebSocket 连接已断开")
+            except Exception as e:
+                logger.exception(f"WebSocket 连接错误: {e}")
+            finally:
+                self.websocket = None
+            
+            # 如果不是主动关闭，则等待 10 秒后重连
+            if not self._shutdown_event.is_set():
+                logger.info("将在 10 秒后尝试重新连接 WebSocket...")
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    # 超时说明 10 秒内没有收到关闭信号，继续重连
+                    pass
+        
+        logger.info("WebSocket 接收循环已退出")
     
     def setup_handlers(self) -> None:
         """设置所有命令和消息处理器"""

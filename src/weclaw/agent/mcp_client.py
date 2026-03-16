@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from typing import Any
 
@@ -119,7 +120,7 @@ class MCPClient:
 async def main():
     parser = argparse.ArgumentParser(description="MCP 客户端命令行工具")
     parser.add_argument("--base-url", "-u", required=True, help="MCP 服务器 URL")
-    parser.add_argument("--api-key", "-k", required=True, help="API 密钥")
+    parser.add_argument("--api-key", "-k", required=True, help="API key 的环境变量名（如 DASHSCOPE_API_KEY），程序会自动从环境变量中读取实际值")
     
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
     
@@ -144,9 +145,14 @@ async def main():
         parser.print_help()
         return
     
+    # 从环境变量名解析出实际的 API key
+    api_key = os.getenv(args.api_key) or args.api_key
+    if api_key == args.api_key:
+        logging.warning(f"环境变量 {args.api_key} 未设置，将直接使用传入的值作为 API key")
+
     async with MCPClient(
         base_url=args.base_url,
-        api_key=args.api_key,
+        api_key=api_key,
     ) as client:
         try:
             if args.command == "list-tools":

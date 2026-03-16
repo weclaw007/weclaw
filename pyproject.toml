@@ -21,7 +21,6 @@ dependencies = [
     "websockets",
     "aiosqlite",
     "langgraph-checkpoint-sqlite",
-    "gradio>=6.9.0",
 ]
 
 [project.optional-dependencies]

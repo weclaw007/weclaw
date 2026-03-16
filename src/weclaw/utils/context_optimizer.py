@@ -1,22 +1,19 @@
 """上下文优化工具模块。
 
-提供对话上下文精简、文本摘要等通用功能，
+提供对话上下文精简、文本摘要、工具结果归档等通用功能，
 可被 Agent 及其他模块导入使用。
 """
 
 import logging
-import os
 
-from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph.message import RemoveMessage
+
+from weclaw.utils.model_registry import ModelRegistry
+from weclaw.utils.paths import get_tool_archive_dir
 
 logger = logging.getLogger(__name__)
 
-# 默认模型与网关；仅在环境变量未设置时使用。
-_DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-
-# 摘要使用的轻量模型名称
+# 摘要使用的轻量模型名称（对应 models.yaml 中的配置名）
 SUMMARY_MODEL = "qwen-turbo"
 # 摘要请求超时时间（秒）
 SUMMARY_TIMEOUT = 30
@@ -39,11 +36,9 @@ async def summarize_text(content: str, prompt: str | None = None, max_length: in
     if not content or not content.strip():
         return content
 
-    llm = init_chat_model(
-        model=SUMMARY_MODEL,
-        model_provider="openai",
-        api_key=os.getenv("DASHSCOPE_API_KEY"),
-        base_url=os.getenv("BASE_URL") or _DEFAULT_BASE_URL,
+    registry = ModelRegistry.get_instance()
+    llm = registry.create_chat_model(
+        name=SUMMARY_MODEL,
         request_timeout=SUMMARY_TIMEOUT,
     )
 
@@ -97,37 +92,65 @@ def split_into_rounds(messages: list) -> list[list]:
     return rounds
 
 
-def trim_old_rounds(messages: list, keep_recent: int = 4) -> list:
-    """保留最近 keep_recent 轮对话，删除更早的轮次。
+# 工具结果归档的内容长度阈值
 
-    返回 RemoveMessage 列表，可直接用于 LangGraph state 中安全地删除消息。
-    按完整轮次删除保证 AIMessage ↔ ToolMessage 配对不被破坏。
+# 工具结果归档的内容长度阈值（超过此长度的 ToolMessage 会被归档）
+TOOL_ARCHIVE_MIN_LENGTH = 500
+
+# 归档后替换标记前缀，用于识别已归档的消息
+TOOL_ARCHIVE_PREFIX = "[Tool Result Archived]"
+
+
+def archive_tool_result(session_id: str, tool_call_id: str, tool_name: str,
+                        tool_args: str, content: str) -> str:
+    """将工具调用结果归档到本地文件，返回替换后的摘要文本。
 
     Args:
-        messages: 完整的消息列表。
-        keep_recent: 保留最近的轮次数（一轮 = HumanMessage + 后续所有回复）。
+        session_id: 会话 ID
+        tool_call_id: 工具调用 ID（唯一标识）
+        tool_name: 工具名称
+        tool_args: 工具调用参数摘要
+        content: 工具调用的完整结果内容
 
     Returns:
-        需要删除的 RemoveMessage 列表；若无需裁剪则返回空列表。
+        归档后的替换文本
     """
-    rounds = split_into_rounds(messages)
+    archive_dir = get_tool_archive_dir(session_id)
+    # 使用 tool_call_id 作为文件名（去掉可能的特殊字符）
+    safe_id = tool_call_id.replace("/", "_").replace("\\", "_")
+    filepath = archive_dir / f"{safe_id}.txt"
+    filepath.write_text(content, encoding="utf-8")
+    logger.info(f"Archived tool result: {tool_name}({tool_args}) -> {filepath}")
 
-    # 区分 SystemMessage 轮次和对话轮次
-    dialog_rounds: list[list] = []
-    for r in rounds:
-        if not (len(r) == 1 and isinstance(r[0], SystemMessage)):
-            dialog_rounds.append(r)
+    # 构造替换文本：保留足够线索让 LLM 判断是否需要读取原文
+    replacement = (
+        f"{TOOL_ARCHIVE_PREFIX} ID: {tool_call_id}\n"
+        f"Tool: {tool_name}\n"
+        f"Args: {tool_args}\n"
+        f"Original content length: {len(content)} chars\n"
+        f"To view full result, call read_tool_result with ID: {tool_call_id}"
+    )
+    return replacement
 
-    # 对话轮次不足 keep_recent，无需裁剪
-    if len(dialog_rounds) <= keep_recent:
-        return []
 
-    rounds_to_remove = dialog_rounds[:-keep_recent]
+def read_archived_tool_result(session_id: str, tool_call_id: str) -> str:
+    """从本地文件读取已归档的工具调用结果。
 
-    # 整轮生成 RemoveMessage，不会破坏消息配对
-    removals = []
-    for round_msgs in rounds_to_remove:
-        for msg in round_msgs:
-            removals.append(RemoveMessage(id=msg.id))
+    Args:
+        session_id: 会话 ID
+        tool_call_id: 工具调用 ID
 
-    return removals
+    Returns:
+        原始工具调用结果内容，若文件不存在则返回错误提示
+    """
+    archive_dir = get_tool_archive_dir(session_id)
+    safe_id = tool_call_id.replace("/", "_").replace("\\", "_")
+    filepath = archive_dir / f"{safe_id}.txt"
+    if filepath.exists():
+        return filepath.read_text(encoding="utf-8")
+    return f"Archived result not found for ID: {tool_call_id}"
+
+
+def is_archived_tool_message(content: str) -> bool:
+    """判断 ToolMessage 是否已经被归档替换过。"""
+    return isinstance(content, str) and content.startswith(TOOL_ARCHIVE_PREFIX)

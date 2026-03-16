@@ -7,6 +7,7 @@ metadata:
     "openclaw":
       {
         "emoji": "🤖",
+        "primaryEnv": "TELEGRAM_BOT_TOKEN",
         "requires": { "bins": ["python", "python3"] }
       },
   }
@@ -26,9 +27,9 @@ PYTHONW_CMD=$(command -v pythonw3 >/dev/null 2>&1 && echo pythonw || echo python
 
 # Run Telegram interaction script (non-blocking on Windows)
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-    $PYTHONW_CMD scripts/telegram.py
+    $PYTHONW_CMD scripts/telegram_bot.py
 else
     # On Unix-like systems, use background process
-    $PYTHON_CMD scripts/telegram.py &
+    $PYTHON_CMD scripts/telegram_bot.py &
 fi
 ```

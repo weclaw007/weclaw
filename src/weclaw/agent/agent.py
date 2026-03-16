@@ -15,15 +15,17 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from weclaw.agent.skill_manager import SkillManager
-from weclaw.utils.context_optimizer import summarize_text, trim_old_rounds
+from weclaw.utils.context_optimizer import (
+    archive_tool_result,
+    read_archived_tool_result,
+    is_archived_tool_message,
+    TOOL_ARCHIVE_MIN_LENGTH,
+    TOOL_ARCHIVE_PREFIX,
+)
 from weclaw.utils.model_registry import ModelRegistry
 from weclaw.utils.paths import get_checkpoint_db_path
 
 logger = logging.getLogger(__name__)
-
-
-# 错误消息内容低于此长度时不做摘要（内容太短没有摘要价值）
-_ERROR_MIN_LENGTH = 200
 
 
 def base64_encode(path: str | Path) -> str:
@@ -155,6 +157,7 @@ class Agent:
         self.agent: Any | None = None
         self.config: Dict[str, Any] | None = None
         self._db_conn: aiosqlite.Connection | None = None
+        self._session_id: str = "main"
 
     async def __aenter__(self):
         return self
@@ -199,6 +202,7 @@ class Agent:
 
         # session_id 默认为 "main"，每个 session 独立目录
         resolved_session_id = session_id or "main"
+        self._session_id = resolved_session_id
 
         # 使用 SQLite 持久化对话检查点（按 session 隔离）
         db_path = get_checkpoint_db_path(resolved_session_id)
@@ -207,14 +211,32 @@ class Agent:
         await checkpoint.setup()  # 初始化数据库表结构
         self.config = {"configurable": {"thread_id": resolved_session_id}}
 
+        # 创建 read_tool_result 工具（闭包捕获 session_id）
+        _read_tool_result = self._create_read_tool_result_tool(resolved_session_id)
+
         # 默认注入系统工具，支持调用方追加自定义工具。
-        tools = [run_command, read_local_file, read_skill, *(custom_tools or [])]
+        tools = [run_command, read_local_file, read_skill, _read_tool_result, *(custom_tools or [])]
         self.agent = create_agent(
             model=llm,
             checkpointer=checkpoint,
             system_prompt=system_prompt,
             tools=tools,
         )
+
+    @staticmethod
+    def _create_read_tool_result_tool(session_id: str) -> BaseTool:
+        """创建 read_tool_result 工具，通过闭包绑定 session_id。"""
+
+        @tool
+        async def read_tool_result(tool_call_id: str) -> str:
+            """Read the original content of an archived tool call result.
+
+            When you see "[Tool Result Archived] ID: xxx" in conversation history,
+            use this tool with the corresponding ID to retrieve the full original result.
+            """
+            return read_archived_tool_result(session_id, tool_call_id)
+
+        return read_tool_result
 
     async def close(self) -> None:
         """关闭 SQLite 连接，释放资源。"""
@@ -223,111 +245,136 @@ class Agent:
             self._db_conn = None
             logger.info("SQLite checkpoint 连接已关闭")
 
-    # 已摘要的错误消息前缀，用于避免重复处理
-    _ERROR_SUMMARY_PREFIX = "[工具执行失败]"
+    # 工具结果归档：跳过最近 N 轮的 ToolMessage，只归档更早的
+    _ARCHIVE_SKIP_RECENT_ROUNDS = 1
 
-    @staticmethod
-    def _is_tool_error(msg) -> bool:
-        """判断 ToolMessage 是否为错误消息，仅依赖 status 字段（LangGraph 原生标记）。"""
-        # 仅信任框架层面的 status 标记，避免关键词匹配误判正常内容
-        if getattr(msg, "status", None) != "error":
-            return False
-        content = getattr(msg, "content", "") or ""
-        if not isinstance(content, str):
-            return False
-        # 跳过已经摘要替换过的消息
-        if content.startswith(Agent._ERROR_SUMMARY_PREFIX):
-            return False
-        # content 为空或太短时跳过，没有摘要价值
-        if len(content) < _ERROR_MIN_LENGTH:
-            return False
-        return True
+    async def _archive_tool_results(self) -> None:
+        """扫描对话历史，将超长的 ToolMessage 内容归档到本地文件并替换为摘要。
 
-    @staticmethod
-    async def _summarize_error(content: str) -> str:
+        只处理非最近 N 轮的 ToolMessage，最近轮次保持原样以确保 LLM 正常推理。
         """
-        对错误的 ToolMessage 内容生成摘要。
-        使用通用的 summarize_text 函数生成简洁的错误摘要。
-        如果摘要失败，则回退为前缀 + 原始内容截断。
-        """
-        try:
-            summary = await summarize_text(
-                content
-            )
-            if summary:
-                return f"{Agent._ERROR_SUMMARY_PREFIX} {summary}"
-        except Exception as e:
-            logger.warning(f"摘要生成失败，回退为截断原始内容: {e}")
-
-        # 回退：截断过长的原始内容
-        truncated = content[:500] + "..." if len(content) > 500 else content
-        return f"{Agent._ERROR_SUMMARY_PREFIX} {truncated}"
-
-    # 上下文压缩：保留最近的对话轮次数（一轮 = HumanMessage + 后续所有回复）
-    _KEEP_RECENT_ROUNDS = 4
-
-    async def _trim_old_rounds(self) -> None:
-        """裁剪过早的对话轮次，只保留最近 N 轮，减少上下文 token。"""
-        if self.agent is None or self.config is None:
-            return
-
-        try:
-            state = await self.agent.aget_state(self.config)
-            messages = state.values.get("messages", [])
-
-            removals = trim_old_rounds(messages, keep_recent=self._KEEP_RECENT_ROUNDS)
-            if removals:
-                await self.agent.aupdate_state(self.config, {"messages": removals})
-                logger.info(f"已裁剪 {len(removals)} 条旧消息（保留最近 {self._KEEP_RECENT_ROUNDS} 轮）")
-        except Exception as e:
-            logger.warning(f"裁剪旧轮次失败: {e}")
-
-    async def _trim_error_tool_messages(self) -> None:
-        """扫描对话历史，将错误的 ToolMessage 内容替换为摘要，减少上下文 token。"""
         if self.agent is None or self.config is None:
             return
 
         try:
             from langchain_core.messages import ToolMessage
+            from weclaw.utils.context_optimizer import split_into_rounds
 
             state = await self.agent.aget_state(self.config)
             messages = state.values.get("messages", [])
 
+            if not messages:
+                return
+
+            # 按轮次切分，确定需要保护的最近 N 轮消息 ID 集合
+            rounds = split_into_rounds(messages)
+            # 过滤掉 SystemMessage 轮次，只统计对话轮次
+            from langchain_core.messages import SystemMessage as _SM
+            dialog_rounds = [r for r in rounds if not (len(r) == 1 and isinstance(r[0], _SM))]
+
+            # 最近 N 轮的消息 ID 集合（这些不归档）
+            protected_ids: set[str] = set()
+            for r in dialog_rounds[-self._ARCHIVE_SKIP_RECENT_ROUNDS:]:
+                for msg in r:
+                    protected_ids.add(msg.id)
+
+            # 构建 tool_call_id -> (tool_name, tool_args) 的映射
+            # 从 AIMessage 的 tool_calls 中提取
+            tool_call_info: dict[str, tuple[str, str]] = {}
+            for msg in messages:
+                if msg.type == "ai" and hasattr(msg, "tool_calls"):
+                    for tc in (msg.tool_calls or []):
+                        tc_id = tc.get("id", "")
+                        tc_name = tc.get("name", "unknown")
+                        tc_args = str(tc.get("args", {}))[:200]  # 参数摘要，限制长度
+                        tool_call_info[tc_id] = (tc_name, tc_args)
+
             updates = []
             for msg in messages:
-                if msg.type == "tool" and self._is_tool_error(msg):
-                    original_content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    summary = await self._summarize_error(original_content)
-                    trimmed = ToolMessage(
-                        content=summary,
-                        tool_call_id=msg.tool_call_id,
-                        id=msg.id,
-                    )
-                    updates.append(trimmed)
+                if msg.type != "tool":
+                    continue
+                # 跳过受保护的最近轮次
+                if msg.id in protected_ids:
+                    continue
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                # 跳过已归档的、太短的
+                if is_archived_tool_message(content):
+                    continue
+                if len(content) < TOOL_ARCHIVE_MIN_LENGTH:
+                    continue
+
+                # 获取工具名称和参数信息
+                tc_id = getattr(msg, "tool_call_id", "") or msg.id
+                tool_name, tool_args = tool_call_info.get(tc_id, ("unknown", "{}"))
+
+                # 归档到本地文件并生成替换文本
+                replacement = archive_tool_result(
+                    session_id=self._session_id,
+                    tool_call_id=tc_id,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    content=content,
+                )
+
+                trimmed = ToolMessage(
+                    content=replacement,
+                    tool_call_id=msg.tool_call_id,
+                    id=msg.id,
+                )
+                updates.append(trimmed)
 
             if updates:
                 await self.agent.aupdate_state(self.config, {"messages": updates})
-                logger.info(f"已摘要替换 {len(updates)} 条错误 ToolMessage")
+                logger.info(f"Archived {len(updates)} ToolMessage(s) (protected recent {self._ARCHIVE_SKIP_RECENT_ROUNDS} round(s))")
         except Exception as e:
-            logger.warning(f"清理错误 ToolMessage 失败: {e}")
+            logger.warning(f"归档 ToolMessage 失败: {e}")
 
     def _build_content(self, input_content: Union[str, Dict[str, Any]]) -> list[dict[str, Any]]:
-        """将文本/多模态输入转换为模型所需 content 结构。"""
+        """将文本/多模态输入转换为模型所需 content 结构。
+
+        支持两种方式传入多模态数据：
+        1. 本地文件路径：image/audio/video 字段，值为文件路径
+        2. Base64 编码数据：image_b64/audio_b64/video_b64 字段，值为 base64 字符串
+           - 使用 b64 字段时，可通过 image_mime/audio_format/video_mime 指定格式
+        """
         if isinstance(input_content, str):
             return [{"type": "text", "text": input_content}]
 
         content: list[dict[str, Any]] = [{"type": "text", "text": input_content.get("text", "")}]
 
+        # --- 图片处理 ---
+        image_b64 = input_content.get("image_b64")
         image_path = input_content.get("image")
-        if image_path and Path(image_path).exists():
+        if image_b64:
+            # 直接使用 base64 数据，默认 MIME 为 image/png
+            try:
+                mime = input_content.get("image_mime", "image/png")
+                data_uri = f"data:{mime};base64,{image_b64}"
+                content.append({"type": "image_url", "image_url": {"url": data_uri}})
+            except Exception as e:
+                logger.exception(f"处理图片 base64 数据失败: {e}")
+        elif image_path and Path(image_path).exists():
             try:
                 data_uri = f"data:{get_mime_type(image_path)};base64,{base64_encode(image_path)}"
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             except Exception as e:
                 logger.exception(f"处理图片失败: {e}")
 
+        # --- 音频处理 ---
+        audio_b64 = input_content.get("audio_b64")
         audio_path = input_content.get("audio")
-        if audio_path and Path(audio_path).exists():
+        if audio_b64:
+            # 直接使用 base64 数据，默认格式为 wav
+            try:
+                audio_format = input_content.get("audio_format", "wav")
+                data_uri = f"data:;base64,{audio_b64}"
+                content.append({
+                    "type": "input_audio",
+                    "input_audio": {"data": data_uri, "format": audio_format},
+                })
+            except Exception as e:
+                logger.exception(f"处理音频 base64 数据失败: {e}")
+        elif audio_path and Path(audio_path).exists():
             try:
                 data_uri = f"data:;base64,{base64_encode(audio_path)}"
                 audio_format = Path(audio_path).suffix.lower().lstrip(".") or "mp3"
@@ -338,8 +385,18 @@ class Agent:
             except Exception as e:
                 logger.exception(f"处理音频失败: {e}")
 
+        # --- 视频处理 ---
+        video_b64 = input_content.get("video_b64")
         video_path = input_content.get("video")
-        if video_path and Path(video_path).exists():
+        if video_b64:
+            # 直接使用 base64 数据，默认 MIME 为 video/mp4
+            try:
+                mime = input_content.get("video_mime", "video/mp4")
+                data_uri = f"data:{mime};base64,{video_b64}"
+                content.append({"type": "video_url", "video_url": {"url": data_uri}})
+            except Exception as e:
+                logger.exception(f"处理视频 base64 数据失败: {e}")
+        elif video_path and Path(video_path).exists():
             try:
                 data_uri = f"data:;base64,{base64_encode(video_path)}"
                 content.append({"type": "video_url", "video_url": {"url": data_uri}})
@@ -389,8 +446,7 @@ class Agent:
             )
 
         # 流结束后自动清理上下文
-        #await self._trim_error_tool_messages()
-        #await self._trim_old_rounds()
+        await self._archive_tool_results()
 
     async def astream(
         self,
@@ -433,6 +489,12 @@ async def main():
     skills_json = skill_manager.format_as_json()
 
     prompt_lines = [
+        "## Tool Result Archive",
+        "In conversation history, some earlier tool call results have been archived.",
+        "You will see \"[Tool Result Archived] ID: xxx\" markers with tool name and args info.",
+        "If you need the full result, call the read_tool_result tool with the corresponding ID.",
+        "If the current question is unrelated to archived content, no need to read it.",
+        "",
         "## Skills (mandatory)",
         "Before replying: scan the available_skills JSON array below.",
         f"- If exactly one skill clearly applies: read its SKILL.md at 'name' with `read_skill`, then follow it.",
