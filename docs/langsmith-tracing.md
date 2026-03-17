@@ -112,7 +112,7 @@ LANGSMITH_TRACING=false
 
 ```json
 {
-  "input": "{\"command\": \"PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python) && $PYTHON_CMD -m weclaw.agent.mcp_client -u https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/sse -k DASHSCOPE_API_KEY call-tool bailian_web_search -a '{\"query\": \"今天最新的军事新闻\", \"count\": 5}'\"}"
+  "input": "{\"command\": \"PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python) && $PYTHON_CMD -m weclaw.agent.mcp_client -u https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/sse -k DASHSCOPE_API_KEY call_command bailian_web_search -a '{\"query\": \"今天最新的军事新闻\", \"count\": 5}'\"}"
 }
 ```
 

@@ -17,7 +17,7 @@ metadata:
 
 基于高德地图的地理信息服务，提供位置相关功能。通过 `python -m weclaw.agent.mcp_client` 调用远程服务。
 
-## Available Tools
+## Supported Commands
 
 ### 1. `maps_geo` - 地理编码
 将详细的结构化地址转换为经纬度坐标。支持对地标性名胜景区、建筑物名称解析为经纬度坐标。
@@ -116,12 +116,14 @@ PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 调用工具示例（以天气查询为例）：
 
 > **重要：`-u`（--base-url）和 `-k`（--api-key）是必填参数，每次调用都必须传递，不可省略。`-k` 传入的是环境变量名（而非变量值），程序会自动读取环境变量。**
+>
+> **参数格式：`-a` 支持 key=value 格式（推荐，跨平台兼容）和 JSON 格式，多个参数用空格分隔。如果值包含空格，需用双引号包裹，如 `-a address="北京市朝阳区"`。**
 
 ```bash
 $PYTHON_CMD -m weclaw.agent.mcp_client \
   -u https://dashscope.aliyuncs.com/api/v1/mcps/amap-maps/sse \
   -k DASHSCOPE_API_KEY \
-  call-tool maps_weather -a '{"city": "北京"}'
+  call_command maps_weather -a city=北京
 ```
 
 ## Notes

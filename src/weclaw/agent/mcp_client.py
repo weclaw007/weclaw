@@ -10,6 +10,71 @@ from mcp import ClientSession
 from mcp.client.sse import sse_client
 
 
+def parse_arguments(args_list: list[str] | None) -> dict[str, Any]:
+    """解析命令参数，支持 JSON 格式和 key=value 格式。
+
+    支持的格式：
+    1. JSON 格式（单个字符串）：'{"city": "北京"}'
+    2. key=value 格式（多个参数）：city=北京 count=5
+    3. 混合格式时优先尝试 JSON 解析
+
+    key=value 格式中，值会自动进行类型推断：
+    - 纯数字 -> int/float
+    - true/false -> bool
+    - 其他 -> str
+    """
+    if not args_list:
+        return {}
+
+    # 如果只有一个参数，先尝试作为 JSON 解析
+    if len(args_list) == 1:
+        raw = args_list[0]
+        # 去除可能被 Windows shell 保留的外层单引号
+        if raw.startswith("'") and raw.endswith("'"):
+            raw = raw[1:-1]
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # JSON 解析失败，当作单个 key=value 处理
+        if "=" in raw:
+            args_list = [raw]
+        else:
+            raise ValueError(
+                f"Invalid argument format: '{raw}'. "
+                "Use JSON format '{\"key\": \"value\"}' or key=value format 'key=value'."
+            )
+
+    # key=value 格式解析
+    result = {}
+    for item in args_list:
+        if "=" not in item:
+            raise ValueError(
+                f"Invalid argument: '{item}'. Expected key=value format (e.g. city=北京)."
+            )
+        key, _, value = item.partition("=")
+        key = key.strip()
+        value = value.strip()
+
+        # 类型推断
+        if value.lower() == "true":
+            result[key] = True
+        elif value.lower() == "false":
+            result[key] = False
+        else:
+            try:
+                result[key] = int(value)
+            except ValueError:
+                try:
+                    result[key] = float(value)
+                except ValueError:
+                    result[key] = value
+
+    return result
+
+
 class MCPClient:
     """MCP 客户端，使用官方 SDK 通过 SSE 连接远程 MCP 服务器。"""
 
@@ -127,11 +192,11 @@ async def main():
     # list-tools 命令
     subparsers.add_parser("list-tools", help="列出所有可用工具")
     
-    # call-tool 命令
-    call_parser = subparsers.add_parser("call-tool", help="调用指定工具")
-    call_parser.add_argument("name", help="工具名称")
-    call_parser.add_argument("--args", "-a", help="工具参数（JSON 格式）", default="{}")
-    
+    # call_command 命令
+    call_parser = subparsers.add_parser("call_command", help="调用指定命令")
+    call_parser.add_argument("command_name", help="命令名称")
+    call_parser.add_argument("--args", "-a", nargs="*", help="命令参数，支持 JSON 格式或 key=value 格式（如 city=北京 count=5）", default=[])
+
     # list-resources 命令
     subparsers.add_parser("list-resources", help="列出所有可用资源")
     
@@ -159,14 +224,14 @@ async def main():
                 tools = await client.list_tools()
                 print(json.dumps(tools, ensure_ascii=False, indent=2))
                 
-            elif args.command == "call-tool":
+            elif args.command == "call_command":
                 try:
-                    tool_args = json.loads(args.args)
-                except json.JSONDecodeError as e:
-                    print(f"错误：工具参数必须是有效的 JSON 格式: {e}", file=sys.stderr)
+                    tool_args = parse_arguments(args.args)
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"Error: invalid command arguments: {e}", file=sys.stderr)
                     sys.exit(1)
                 
-                result = await client.call_tool(args.name, tool_args)
+                result = await client.call_tool(args.command_name, tool_args)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 
             elif args.command == "list-resources":

@@ -50,9 +50,9 @@ metadata:
 
 技能的详细说明。
 
-## Available Tools
+## Supported Commands
 
-### 1. `tool_name` - 工具名称
+### 1. `command_name`
 工具的功能描述。
 - **param1** (string, 必填): 参数说明
 - **param2** (string, 可选): 参数说明
@@ -65,13 +65,13 @@ Python command compatibility:
 PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 \```
 
-调用示例（`-k` 传入的是环境变量名，程序会自动读取环境变量的值）：
+调用示例（`-k` 传入的是环境变量名，程序会自动读取环境变量的值；`-a` 支持 key=value 格式和 JSON 格式）：
 
 \```bash
 $PYTHON_CMD -m weclaw.agent.mcp_client \
   -u https://your-mcp-server-url/sse \
   -k YOUR_API_KEY \
-  call-tool tool_name -a '{"param1": "value"}'
+  call_command command_name -a param1="value with spaces" param2=value2
 \```
 
 ## Notes
@@ -109,7 +109,7 @@ YOUR_API_KEY=your-key-here
 
 正文部分会在 Agent 调用技能时被读取，建议包含：
 
-- **Available Tools**：列出所有可用工具及参数，帮助 Agent 正确调用
+- **Available Commands**：列出所有可用工具及参数，帮助 Agent 正确调用
 - **Quick Start**：命令行调用示例
 - **Notes**：注意事项
 
@@ -164,8 +164,12 @@ python -m weclaw.agent.mcp_client \
 python -m weclaw.agent.mcp_client \
   -u https://your-mcp-server-url/sse \
   -k YOUR_API_KEY \
-  call-tool tool_name -a '{"param": "value"}'
+  call_command command_name -a param=value
 ```
+
+> **参数格式说明**：`-a` 支持两种格式：
+> - **key=value 格式（推荐）**：跨平台兼容，无引号转义问题。如 `-a city=北京 count=5`。**如果值包含空格，需用双引号包裹**，如 `-a prompt="A cinematic sunset"`
+> - **JSON 格式**：如 `-a '{"city": "北京", "count": 5}'`（注意 Windows 下需要转义双引号）
 
 ### 查看已加载的技能
 

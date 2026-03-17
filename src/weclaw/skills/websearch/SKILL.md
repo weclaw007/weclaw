@@ -30,18 +30,20 @@ Python command compatibility (some machines use `python`, others use `python3`):
 PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 ```
 
-## Available Tools
+## Supported Commands
 
 ### 1. bailian_web_search
 搜索可用于查询百科知识、时事新闻、天气等信息
 
 > **重要：`-u`（--base-url）和 `-k`（--api-key）是必填参数，每次调用都必须传递，不可省略。`-k` 传入的是环境变量名（而非变量值），程序会自动读取环境变量。**
+>
+> **参数格式：`-a` 支持 key=value 格式（推荐，跨平台兼容）和 JSON 格式，多个参数用空格分隔。如果值包含空格，需用双引号包裹，如 `-a query="latest AI news"`。**
 
 ```bash
 $PYTHON_CMD -m weclaw.agent.mcp_client \
   -u https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/sse \
   -k DASHSCOPE_API_KEY \
-  call-tool bailian_web_search -a '{"query": "今天最新的军事新闻", "count": 5}'
+  call_command bailian_web_search -a query="今天最新的军事新闻" count=5
 ```
 
 ## Notes
