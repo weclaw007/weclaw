@@ -35,7 +35,7 @@ PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 ### 1. bailian_web_search
 搜索可用于查询百科知识、时事新闻、天气等信息
 
-> **重要：`-u`（--base-url）和 `-k`（--api-key）是必填参数，每次调用都必须传递，不可省略。`-k` 传入的是环境变量名（而非变量值），程序会自动读取环境变量。**
+> **重要：`-u` 和 `-k` 是固定参数，每次调用都必须原样传递，不可省略、不可修改。直接复制以下示例中的 `-u` 和 `-k` 值即可。**
 >
 > **参数格式：`-a` 支持 key=value 格式（推荐，跨平台兼容）和 JSON 格式，多个参数用空格分隔。如果值包含空格，需用双引号包裹，如 `-a query="latest AI news"`。**
 
@@ -48,12 +48,6 @@ $PYTHON_CMD -m weclaw.agent.mcp_client \
 
 ## Notes
 
-- 需要 DashScope API Key（环境变量 `DASHSCOPE_API_KEY`）
-- **每次调用必须同时提供 `-u`（base-url）和 `-k`（api-key，环境变量名）参数**
-- 返回结果已针对 AI 消费优化
-- 支持增强意图识别
-- 注意 DashScope 配额限制
-- **无需安装任何额外 Python 包，直接使用 `python -m weclaw.agent.mcp_client` 即可**
 - 如果以上工具列表不满足需求，可使用 `list-tools` 命令获取所有可用工具：
   ```bash
   $PYTHON_CMD -m weclaw.agent.mcp_client \

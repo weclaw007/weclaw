@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from weclaw.utils.command import run_command, check_bins_exist
 
@@ -23,6 +23,56 @@ def _filter_install_list(install_list: list[dict], current_platform: str) -> lis
         elif kind not in ["brew", "apt", "choco"]:
             filtered.append(install_item)
     return filtered
+
+
+# ============================================================
+# 通用辅助函数：消除安装/卸载的重复代码
+# ============================================================
+
+async def _run_install_command(command: str) -> dict[str, Any]:
+    """执行安装/卸载命令并返回标准化结果。"""
+    result = await run_command(command)
+    return {
+        "success": result["returncode"] == 0,
+        "output": result.get("stdout", ""),
+        "error": result.get("stderr") if result["returncode"] != 0 else None
+    }
+
+
+async def _simple_install(install_item: dict[str, Any], pkg_field: str, cmd_template: str) -> dict[str, Any]:
+    """通用简单安装：从 install_item 读取包名，填入命令模板执行。
+
+    Args:
+        install_item: 安装配置项
+        pkg_field: 包名字段（如 "package"、"formula"）
+        cmd_template: 命令模板，{pkg} 会被替换为实际包名
+    """
+    package = install_item.get(pkg_field, "")
+    if not package:
+        return {"success": False, "error": f"缺少 {pkg_field} 字段"}
+
+    try:
+        return await _run_install_command(cmd_template.format(pkg=package))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+async def _simple_uninstall(install_item: dict[str, Any], pkg_field: str, cmd_template: str) -> dict[str, Any]:
+    """通用简单卸载：从 install_item 读取包名，填入命令模板执行。
+
+    Args:
+        install_item: 安装配置项
+        pkg_field: 包名字段
+        cmd_template: 命令模板，{pkg} 会被替换为实际包名
+    """
+    package = install_item.get(pkg_field, "")
+    if not package:
+        return {"success": False, "error": f"缺少 {pkg_field} 字段"}
+
+    try:
+        return await _run_install_command(cmd_template.format(pkg=package))
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 async def check_skills_installed(skill_metadata: dict[str, Any]) -> bool:
@@ -239,12 +289,7 @@ async def _install_brew(install_item: dict[str, Any]) -> dict[str, Any]:
             tap_name = "/".join(formula.split("/")[:2])
             await run_command(f"brew tap {tap_name}")
 
-        result = await run_command(f"brew install {formula}")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
+        return await _run_install_command(f"brew install {formula}")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -322,36 +367,12 @@ async def _get_go_bin_dir() -> str | None:
 
 async def _install_uv(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 uv pip install 安装"""
-    package = install_item.get("package", "")
-    if not package:
-        return {"success": False, "error": "缺少 package 字段"}
-
-    try:
-        result = await run_command(f"uv pip install {package}")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return await _simple_install(install_item, "package", "uv pip install {pkg}")
 
 
 async def _install_choco(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 Chocolatey 安装"""
-    package = install_item.get("package", "")
-    if not package:
-        return {"success": False, "error": "缺少 package 字段"}
-
-    try:
-        result = await run_command(f"choco install {package} -y")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return await _simple_install(install_item, "package", "choco install {pkg} -y")
 
 
 async def _install_apt(install_item: dict[str, Any]) -> dict[str, Any]:
@@ -369,12 +390,7 @@ async def _install_apt(install_item: dict[str, Any]) -> dict[str, Any]:
                 "error": f"包列表更新失败: {update_result.get('stderr', '未知错误')}"
             }
 
-        result = await run_command(f"sudo apt install {package} -y")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
+        return await _run_install_command(f"sudo apt install {package} -y")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -386,22 +402,16 @@ async def _install_node(install_item: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": "缺少 package 字段"}
 
     package_manager = install_item.get("package_manager", "npm")
+    is_global = install_item.get("global", False)
 
     try:
-        is_global = install_item.get("global", False)
-        global_flag = "-g" if is_global else ""
-
         if package_manager == "yarn":
             command = f"yarn global add {package}" if is_global else f"yarn add {package}"
         else:
+            global_flag = "-g" if is_global else ""
             command = f"npm install {package} {global_flag}"
 
-        result = await run_command(command)
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
+        return await _run_install_command(command)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -413,17 +423,9 @@ async def _install_pip(install_item: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": "缺少 package 字段"}
 
     try:
-        is_global = install_item.get("global", False)
-        user_flag = "--user" if is_global else ""
+        user_flag = "--user" if install_item.get("global", False) else ""
         pip_command = install_item.get("pip_command", "pip")
-
-        command = f"{pip_command} install {package} {user_flag}"
-        result = await run_command(command)
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
+        return await _run_install_command(f"{pip_command} install {package} {user_flag}")
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -554,19 +556,7 @@ async def _execute_uninstall(skill_name: str, install_item: dict[str, Any]) -> d
 
 async def _uninstall_brew(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 Homebrew 卸载"""
-    formula = install_item.get("formula", "")
-    if not formula:
-        return {"success": False, "error": "缺少 formula 字段"}
-
-    try:
-        result = await run_command(f"brew uninstall {formula}")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return await _simple_uninstall(install_item, "formula", "brew uninstall {pkg}")
 
 
 async def _uninstall_go(install_item: dict[str, Any]) -> dict[str, Any]:
@@ -610,53 +600,17 @@ async def _uninstall_go(install_item: dict[str, Any]) -> dict[str, Any]:
 
 async def _uninstall_uv(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 uv pip uninstall 卸载"""
-    package = install_item.get("package", "")
-    if not package:
-        return {"success": False, "error": "缺少 package 字段"}
-
-    try:
-        result = await run_command(f"uv pip uninstall {package} -y")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return await _simple_uninstall(install_item, "package", "uv pip uninstall {pkg} -y")
 
 
 async def _uninstall_choco(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 Chocolatey 卸载"""
-    package = install_item.get("package", "")
-    if not package:
-        return {"success": False, "error": "缺少 package 字段"}
-
-    try:
-        result = await run_command(f"choco uninstall {package} -y")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return await _simple_uninstall(install_item, "package", "choco uninstall {pkg} -y")
 
 
 async def _uninstall_apt(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 APT 卸载"""
-    package = install_item.get("package", "")
-    if not package:
-        return {"success": False, "error": "缺少 package 字段"}
-
-    try:
-        result = await run_command(f"sudo apt remove {package} -y")
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return await _simple_uninstall(install_item, "package", "sudo apt remove {pkg} -y")
 
 
 async def _uninstall_node(install_item: dict[str, Any]) -> dict[str, Any]:
@@ -666,22 +620,16 @@ async def _uninstall_node(install_item: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": "缺少 package 字段"}
 
     package_manager = install_item.get("package_manager", "npm")
+    is_global = install_item.get("global", False)
 
     try:
-        is_global = install_item.get("global", False)
-        global_flag = "-g" if is_global else ""
-
         if package_manager == "yarn":
             command = f"yarn global remove {package}" if is_global else f"yarn remove {package}"
         else:
+            global_flag = "-g" if is_global else ""
             command = f"npm uninstall {package} {global_flag}"
 
-        result = await run_command(command)
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
+        return await _run_install_command(command)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -693,16 +641,8 @@ async def _uninstall_pip(install_item: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": "缺少 package 字段"}
 
     try:
-        is_global = install_item.get("global", False)
-        user_flag = "--user" if is_global else ""
+        user_flag = "--user" if install_item.get("global", False) else ""
         pip_command = install_item.get("pip_command", "pip")
-
-        command = f"{pip_command} uninstall {package} {user_flag} -y"
-        result = await run_command(command)
-        return {
-            "success": result["returncode"] == 0,
-            "output": result.get("stdout", ""),
-            "error": result.get("stderr") if result["returncode"] != 0 else None
-        }
+        return await _run_install_command(f"{pip_command} uninstall {package} {user_flag} -y")
     except Exception as e:
         return {"success": False, "error": str(e)}

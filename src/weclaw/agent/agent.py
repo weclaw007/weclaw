@@ -1,9 +1,7 @@
 import asyncio
 import base64
-import concurrent.futures
 import logging
 import os
-import subprocess
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Union
@@ -54,35 +52,8 @@ def get_mime_type(path: str | Path) -> str:
     return "application/octet-stream"
 
 
-# 命令执行使用进程池，避免阻塞主事件循环。
-COMMAND_PROCESS_POOL = concurrent.futures.ProcessPoolExecutor(
-    max_workers=max(2, (os.cpu_count() or 2) // 2)
-)
-
-
-def _run_command_in_process(command: str, timeout: int) -> dict[str, Any]:
-    """在子进程中执行命令并返回结构化结果。"""
-    try:
-        if os.name == "nt":
-            shell_cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
-        else:
-            shell_cmd = ["bash", "-lc", command]
-
-        completed = subprocess.run(
-            shell_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return {
-            "returncode": completed.returncode,
-            "stdout": completed.stdout or "",
-            "stderr": completed.stderr or "",
-        }
-    except subprocess.TimeoutExpired:
-        return {"timeout": True}
-    except Exception as e:
-        return {"error": str(e)}
+# 导入统一的命令执行工具
+from weclaw.utils.command import run_command as _run_command_async
 
 @tool
 async def read_skill(name: str) -> str:
@@ -121,23 +92,12 @@ async def read_local_file(file_path: str) -> str:
 @tool
 async def run_command(command: str, timeout: int = 60) -> str:
     """执行命令行工具（Windows: powershell，其他: bash）。"""
-    loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(
-            COMMAND_PROCESS_POOL,
-            _run_command_in_process,
-            command,
-            timeout,
-        )
+        result = await _run_command_async(command, timeout=timeout, capture=True)
 
-        if result.get("timeout"):
-            return f"命令执行超时（{timeout}s）"
-        if result.get("error"):
-            return f"命令执行异常: {result['error']}"
-
-        stdout = str(result.get("stdout", "")).strip()
-        stderr = str(result.get("stderr", "")).strip()
-        returncode = int(result.get("returncode", 1))
+        stdout = result.get("stdout", "").strip()
+        stderr = result.get("stderr", "").strip()
+        returncode = result.get("returncode", 1)
 
         if returncode == 0:
             return stdout or "命令执行成功（无输出）"
@@ -343,67 +303,77 @@ class Agent:
         content: list[dict[str, Any]] = [{"type": "text", "text": input_content.get("text", "")}]
 
         # --- 图片处理 ---
-        image_b64 = input_content.get("image_b64")
-        image_path = input_content.get("image")
-        if image_b64:
-            # 直接使用 base64 数据，默认 MIME 为 image/png
-            try:
-                mime = input_content.get("image_mime", "image/png")
-                data_uri = f"data:{mime};base64,{image_b64}"
-                content.append({"type": "image_url", "image_url": {"url": data_uri}})
-            except Exception as e:
-                logger.exception(f"处理图片 base64 数据失败: {e}")
-        elif image_path and Path(image_path).exists():
-            try:
-                data_uri = f"data:{get_mime_type(image_path)};base64,{base64_encode(image_path)}"
-                content.append({"type": "image_url", "image_url": {"url": data_uri}})
-            except Exception as e:
-                logger.exception(f"处理图片失败: {e}")
+        self._add_media_content(
+            content, input_content,
+            b64_key="image_b64", path_key="image", mime_key="image_mime",
+            default_mime="image/png", content_type="image_url",
+            builder=lambda uri: {"type": "image_url", "image_url": {"url": uri}},
+            label="图片",
+        )
 
         # --- 音频处理 ---
-        audio_b64 = input_content.get("audio_b64")
-        audio_path = input_content.get("audio")
-        if audio_b64:
-            # 直接使用 base64 数据，默认格式为 wav
-            try:
-                audio_format = input_content.get("audio_format", "wav")
-                data_uri = f"data:;base64,{audio_b64}"
-                content.append({
-                    "type": "input_audio",
-                    "input_audio": {"data": data_uri, "format": audio_format},
-                })
-            except Exception as e:
-                logger.exception(f"处理音频 base64 数据失败: {e}")
-        elif audio_path and Path(audio_path).exists():
-            try:
-                data_uri = f"data:;base64,{base64_encode(audio_path)}"
-                audio_format = Path(audio_path).suffix.lower().lstrip(".") or "mp3"
-                content.append({
-                    "type": "input_audio",
-                    "input_audio": {"data": data_uri, "format": audio_format},
-                })
-            except Exception as e:
-                logger.exception(f"处理音频失败: {e}")
+        self._add_media_content(
+            content, input_content,
+            b64_key="audio_b64", path_key="audio", mime_key="audio_format",
+            default_mime="wav", content_type="input_audio",
+            builder=lambda uri, fmt=None: {
+                "type": "input_audio",
+                "input_audio": {"data": uri, "format": fmt or "wav"},
+            },
+            label="音频", use_format=True,
+        )
 
         # --- 视频处理 ---
-        video_b64 = input_content.get("video_b64")
-        video_path = input_content.get("video")
-        if video_b64:
-            # 直接使用 base64 数据，默认 MIME 为 video/mp4
-            try:
-                mime = input_content.get("video_mime", "video/mp4")
-                data_uri = f"data:{mime};base64,{video_b64}"
-                content.append({"type": "video_url", "video_url": {"url": data_uri}})
-            except Exception as e:
-                logger.exception(f"处理视频 base64 数据失败: {e}")
-        elif video_path and Path(video_path).exists():
-            try:
-                data_uri = f"data:;base64,{base64_encode(video_path)}"
-                content.append({"type": "video_url", "video_url": {"url": data_uri}})
-            except Exception as e:
-                logger.exception(f"处理视频失败: {e}")
+        self._add_media_content(
+            content, input_content,
+            b64_key="video_b64", path_key="video", mime_key="video_mime",
+            default_mime="video/mp4", content_type="video_url",
+            builder=lambda uri: {"type": "video_url", "video_url": {"url": uri}},
+            label="视频",
+        )
 
         return content
+
+    @staticmethod
+    def _add_media_content(
+        content: list[dict[str, Any]],
+        input_content: Dict[str, Any],
+        *,
+        b64_key: str,
+        path_key: str,
+        mime_key: str,
+        default_mime: str,
+        content_type: str,
+        builder,
+        label: str,
+        use_format: bool = False,
+    ) -> None:
+        """通用多媒体内容处理：支持 base64 数据或本地文件路径。"""
+        b64_data = input_content.get(b64_key)
+        file_path = input_content.get(path_key)
+
+        if b64_data:
+            try:
+                mime_or_fmt = input_content.get(mime_key, default_mime)
+                if use_format:
+                    data_uri = f"data:;base64,{b64_data}"
+                    content.append(builder(data_uri, mime_or_fmt))
+                else:
+                    data_uri = f"data:{mime_or_fmt};base64,{b64_data}"
+                    content.append(builder(data_uri))
+            except Exception as e:
+                logger.exception(f"处理{label} base64 数据失败: {e}")
+        elif file_path and Path(file_path).exists():
+            try:
+                if use_format:
+                    data_uri = f"data:;base64,{base64_encode(file_path)}"
+                    fmt = Path(file_path).suffix.lower().lstrip(".") or default_mime
+                    content.append(builder(data_uri, fmt))
+                else:
+                    data_uri = f"data:{get_mime_type(file_path)};base64,{base64_encode(file_path)}"
+                    content.append(builder(data_uri))
+            except Exception as e:
+                logger.exception(f"处理{label}失败: {e}")
 
     async def astream_text(
         self,
@@ -480,37 +450,17 @@ async def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-
+    from weclaw.agent.client import build_system_prompt
     from weclaw.agent.skill_manager import SkillManager
+
     skills_dir = Path(__file__).resolve().parent.parent / "skills"
     skill_manager = SkillManager.get_instance(skills_dir)
     await skill_manager.load()
 
-    skills_json = skill_manager.format_as_json()
-
-    prompt_lines = [
-        "## Tool Result Archive",
-        "In conversation history, some earlier tool call results have been archived.",
-        "You will see \"[Tool Result Archived] ID: xxx\" markers with tool name and args info.",
-        "If you need the full result, call the read_tool_result tool with the corresponding ID.",
-        "If the current question is unrelated to archived content, no need to read it.",
-        "",
-        "## Skills (mandatory)",
-        "Before replying: scan the available_skills JSON array below.",
-        f"- If exactly one skill clearly applies: read its SKILL.md at 'name' with `read_skill`, then follow it.",
-        "- If multiple could apply: choose the most specific one, then read/follow it.",
-        "- If none clearly apply: do not read any SKILL.md.",
-        "Constraints: never read more than one skill up front; only read after selecting.",
-        "When a skill file references a relative path, join it with the `location` field (`location` / relative path)",
-        "",
-        skills_json,
-        "",
-    ]
-
-    system_prompt = "\n".join(prompt_lines)
+    # 复用 client.py 的统一 prompt 构建函数
+    system_prompt = build_system_prompt(skill_manager)
 
     async with Agent() as agent:
-        #await agent.init(system_prompt=system_prompt, model_name="ollama/qwen3.5:9b", request_timeout=10000)
         await agent.init(system_prompt=system_prompt, model_name="qwen-vl", request_timeout=10000)
         print("=" * 50)
         print("多轮对话测试（输入 exit/quit 退出，Ctrl+C 中断）")

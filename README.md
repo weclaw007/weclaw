@@ -221,13 +221,13 @@ ollama:
 
 ## 技术栈
 
-- **后端**：Python 3.12+、LangChain、WebSocket
+- **后端**：Python 3.10+、LangChain、WebSocket
 - **前端**：Vue 3、Element Plus、Vite、markdown-it
 - **通信**：WebSocket（前端通过 Vite 代理连接后端）
 
 ## 要求
 
-- Python 3.12+
+- Python 3.10+
 - Node.js 18+（用于 Web UI）
 - 使用远程 LLM 时，需配置相应的 API Key。打开仓库根目录的 `.env` 文件，按 `KEY=VALUE` 格式添加，例如：
 

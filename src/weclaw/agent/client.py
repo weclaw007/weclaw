@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import uuid
 from typing import Dict
 
@@ -10,6 +9,7 @@ from langchain_core.tools import tool
 
 from weclaw.agent.agent import Agent
 from weclaw.agent.skill_manager import SkillManager
+from weclaw.agent.handlers import SkillHandler, ModelHandler, EnvHandler
 
 
 # module logger
@@ -17,10 +17,19 @@ logger = logging.getLogger(__name__)
 
 
 def build_system_prompt(skill_manager: SkillManager, read_skill_name: str = "read_skill") -> str:
-    """构建包含技能列表的系统提示词。"""
+    """构建包含技能列表和工具结果归档提示的系统提示词。
+
+    这是项目中构建 system prompt 的唯一入口，agent.py 和 client.py 都应复用此函数。
+    """
     skills_json = skill_manager.format_as_json()
 
     prompt_lines = [
+        "## Tool Result Archive",
+        "In conversation history, some earlier tool call results have been archived.",
+        'You will see "[Tool Result Archived] ID: xxx" markers with tool name and args info.',
+        "If you need the full result, call the read_tool_result tool with the corresponding ID.",
+        "If the current question is unrelated to archived content, no need to read it.",
+        "",
         "## Skills (mandatory)",
         "Before replying: scan the available_skills JSON array below.",
         f"- If exactly one skill clearly applies: read its SKILL.md at 'name' with `{read_skill_name}`, then follow it.",
@@ -44,7 +53,34 @@ class Client:
         self.model_name: str | None = None  # 当前使用的模型配置名
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self._tasks: set[asyncio.Task] = set()  # 跟踪所有 create_task 创建的任务
+
+        # 注册系统消息处理器（self 实现了 ClientContext Protocol）
+        # 使用 action → handler 字典映射，实现 O(1) 精准路由
+        self._handler_map: dict[str, BaseHandler] = {}
+        for handler in [
+            SkillHandler(websocket),
+            ModelHandler(websocket, self),
+            EnvHandler(websocket, self),
+        ]:
+            for action in handler.ACTIONS:
+                if action in self._handler_map:
+                    logger.warning(
+                        f"action '{action}' 已被 {type(self._handler_map[action]).__name__} 注册，"
+                        f"将被 {type(handler).__name__} 覆盖"
+                    )
+                self._handler_map[action] = handler
+
         logger.info(f"新客户端连接: {websocket.remote_address}")
+
+    async def reset_agent(self) -> None:
+        """重置 Agent：销毁旧实例，下次对话时会用新配置重新初始化。
+
+        此方法是 ClientContext Protocol 的实现，Handler 通过接口调用此方法，
+        而非直接操作 self.agent 属性。
+        """
+        if self.agent is not None:
+            await self.agent.close()
+            self.agent = None
 
     async def initialize_agent(self):
         """初始化 Agent"""
@@ -125,7 +161,6 @@ class Client:
         logger.info(f"收到二进制消息，长度: {len(message)}")
 
     async def handle_user_message(self, request: dict) -> None:
-        await self.initialize_agent()
         """处理文本消息（JSON格式）
         
         消息格式:
@@ -147,6 +182,7 @@ class Client:
         Args:
             request: 解析后的 JSON 消息对象，包含 id 和其他字段
         """
+        await self.initialize_agent()
         message_id = request.get("id", "")
         try:
             logger.info(f"处理 user 消息 [{message_id}]: {request}")
@@ -169,261 +205,14 @@ class Client:
             error_response = json.dumps({"id": message_id, "type": "error", "error": str(e)}, ensure_ascii=False)
             await self.websocket.send(error_response)
 
-    async def handle_prompt_message(self, message: dict) -> None:
-        """处理系统消息（prompt）"""
-        prompt = message.get("text", "")
-        logger.info(f"处理 prompt 消息: {prompt}")
-        self.inject_prompt = prompt
-
-    async def handle_get_skills_message(self, message: dict) -> None:
-        """处理获取技能列表消息"""
-        # 获取单例 SkillManager
-        skill_manager = SkillManager.get_instance()
-        '''
-         ["name": "文件处理器",
-                "emoji": "📄",
-                "description": "自动处理各种文件格式，支持PDF、Word、Excel等文档转换",
-                "primaryEnv": "DASHSCOPE_API_KEY",
-                "enabled": False
-            }]
-        '''
-        skills = skill_manager.get_skills_for_current_os()
-        skills_json = []
-        for skill, value in skills.items():
-            env_name = value.get("metadata", {}).get("openclaw", {}).get("primaryEnv", "")
-            skill_json = {"name": value["name"], "description": value["description"],
-                          "emoji": value.get("metadata", {}).get("openclaw", {}).get("emoji", ""),
-                          "primaryEnv": os.getenv(env_name) if env_name else "",
-                          "envName": env_name,
-                          "enabled": skill_manager.is_skill_enabled(skill),
-                          "builtin": value.get("_builtin", True)}
-
-            skills_json.append(skill_json)
-        # 发送技能列表到客户端
-        message_id = message.get("id", "")
-        response = json.dumps({"id": message_id, "type": "system", "skills": skills_json, "action":"get_skills"}, ensure_ascii=False)
-        await self.websocket.send(response)
-
-    async def handle_enable_skill_message(self, message: dict) -> None:
-        """处理启用技能消息"""
-        skill_name = message.get("skill_name", "")
-        message_id = message.get("id", "")
-        skill_manager = SkillManager.get_instance()
-
-        try:
-            success = skill_manager.enable_skill(skill_name)
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "enable_skill",
-                "skill_name": skill_name,
-                "success": success
-            }, ensure_ascii=False)
-        except Exception as e:
-            logger.exception(f"启用技能 '{skill_name}' 失败")
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "enable_skill",
-                "skill_name": skill_name,
-                "success": False,
-                "error": str(e)
-            }, ensure_ascii=False)
-        await self.websocket.send(response)
-
-    async def handle_disable_skill_message(self, message: dict) -> None:
-        """处理禁用技能消息"""
-        skill_name = message.get("skill_name", "")
-        message_id = message.get("id", "")
-        skill_manager = SkillManager.get_instance()
-
-        try:
-            success = skill_manager.disable_skill(skill_name)
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "disable_skill",
-                "skill_name": skill_name,
-                "success": success
-            }, ensure_ascii=False)
-        except Exception as e:
-            logger.exception(f"禁用技能 '{skill_name}' 失败")
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "disable_skill",
-                "skill_name": skill_name,
-                "success": False,
-                "error": str(e)
-            }, ensure_ascii=False)
-        await self.websocket.send(response)
-
-    @staticmethod
-    def _find_env_file() -> str:
-        """查找 .env 文件路径，使用 dotenv 的 find_dotenv 定位"""
-        try:
-            from dotenv import find_dotenv
-            env_path = find_dotenv(usecwd=True)
-            if env_path:
-                return env_path
-        except ImportError:
-            pass
-        # 回退：从当前文件向上查找包含 .env 的目录
-        from pathlib import Path
-        current = Path(__file__).resolve().parent
-        for _ in range(10):
-            candidate = current / ".env"
-            if candidate.exists():
-                return str(candidate)
-            parent = current.parent
-            if parent == current:
-                break
-            current = parent
-        # 如果找不到，默认在项目根目录创建
-        return str(Path(__file__).resolve().parent.parent.parent.parent / ".env")
-
-    @staticmethod
-    def _save_env_to_file(env_path: str, env_name: str, api_key: str) -> None:
-        """将环境变量写入 .env 文件（更新已有的或追加新的）"""
-        from pathlib import Path
-        env_file = Path(env_path)
-        lines = []
-        found = False
-
-        if env_file.exists():
-            with open(env_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-
-            # 查找并替换已有的同名变量
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped.startswith(f"{env_name}=") or stripped.startswith(f"{env_name} ="):
-                    lines[i] = f"{env_name}={api_key}\n"
-                    found = True
-                    break
-
-        if not found:
-            # 追加新的环境变量
-            if lines and not lines[-1].endswith("\n"):
-                lines.append("\n")
-            lines.append(f"{env_name}={api_key}\n")
-
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-
-    async def handle_save_api_key_message(self, message: dict) -> None:
-        """处理保存 API Key 消息，同时写入内存环境变量和 .env 文件"""
-        skill_name = message.get("skill_name", "")
-        env_name = message.get("env_name", "")
-        api_key = message.get("api_key", "")
-        message_id = message.get("id", "")
-
-        try:
-            if env_name and api_key:
-                # 1. 设置内存中的环境变量（立即生效）
-                os.environ[env_name] = api_key
-                # 2. 持久化写入 .env 文件（重启后仍生效）
-                env_path = self._find_env_file()
-                self._save_env_to_file(env_path, env_name, api_key)
-                logger.info(f"已保存 API Key: 技能={skill_name}, 环境变量={env_name}, 文件={env_path}")
-                response = json.dumps({
-                    "id": message_id, "type": "system",
-                    "action": "save_api_key",
-                    "skill_name": skill_name,
-                    "success": True
-                }, ensure_ascii=False)
-            else:
-                response = json.dumps({
-                    "id": message_id, "type": "system",
-                    "action": "save_api_key",
-                    "skill_name": skill_name,
-                    "success": False,
-                    "error": "环境变量名或 API Key 为空"
-                }, ensure_ascii=False)
-        except Exception as e:
-            logger.exception(f"保存 API Key 失败: 技能={skill_name}")
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "save_api_key",
-                "skill_name": skill_name,
-                "success": False,
-                "error": str(e)
-            }, ensure_ascii=False)
-        await self.websocket.send(response)
-
-    async def handle_switch_model_message(self, message: dict) -> None:
-        """处理切换模型消息：销毁旧 Agent，下次对话时用新模型重新初始化"""
-        model_name = message.get("model_name", "")
-        message_id = message.get("id", "")
-
-        try:
-            self.model_name = model_name if model_name else None
-            # 关闭旧 Agent，下次 handle_user_message 时会重新初始化
-            if self.agent is not None:
-                await self.agent.close()
-                self.agent = None
-
-            logger.info(f"模型已切换为: {model_name or '默认'}")
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "switch_model",
-                "model_name": model_name,
-                "success": True,
-            }, ensure_ascii=False)
-        except Exception as e:
-            logger.exception(f"切换模型失败: {e}")
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "switch_model",
-                "success": False,
-                "error": str(e),
-            }, ensure_ascii=False)
-        await self.websocket.send(response)
-
-    async def handle_get_models_message(self, message: dict) -> None:
-        """处理获取可用模型列表消息"""
-        from weclaw.utils.model_registry import ModelRegistry
-
-        message_id = message.get("id", "")
-        try:
-            registry = ModelRegistry.get_instance()
-            models = registry.list_available()
-            default_model = registry.get_default()
-            current_model = self.model_name or default_model
-
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "get_models",
-                "models": models,
-                "default": default_model,
-                "current": current_model,
-            }, ensure_ascii=False)
-        except Exception as e:
-            logger.exception(f"获取模型列表失败: {e}")
-            response = json.dumps({
-                "id": message_id, "type": "system",
-                "action": "get_models",
-                "models": [],
-                "error": str(e),
-            }, ensure_ascii=False)
-        await self.websocket.send(response)
-
     async def handle_system_message(self, message: dict) -> None:
+        """路由系统消息到对应的 Handler（基于字典精准路由）"""
         action = message.get("action", "")
-        match action:
-            case "prompt":
-                await self.handle_prompt_message(message)
-            # 获取skill 列表
-            case "get_skills":
-                await self.handle_get_skills_message(message)
-            case "enable_skill":
-                await self.handle_enable_skill_message(message)
-            case "disable_skill":
-                await self.handle_disable_skill_message(message)
-            case "save_api_key":
-                await self.handle_save_api_key_message(message)
-            case "switch_model":
-                await self.handle_switch_model_message(message)
-            case "get_models":
-                await self.handle_get_models_message(message)
-            case _:
-                pass
+        handler = self._handler_map.get(action)
+        if handler is not None:
+            await handler.handle(action, message)
+        else:
+            logger.warning(f"未找到处理 action='{action}' 的 Handler")
 
     async def handle_tool_message(self, message: dict):
         request_id = message['id']

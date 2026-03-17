@@ -50,7 +50,7 @@ PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 
 调用工具示例（以文生图为例）：
 
-> **重要：`-u`（--base-url）和 `-k`（--api-key）是必填参数，每次调用都必须传递，不可省略。`-k` 传入的是环境变量名（而非变量值），程序会自动读取环境变量。**
+> **重要：`-u` 和 `-k` 是固定参数，每次调用都必须原样传递，不可省略、不可修改。直接复制以下示例中的 `-u` 和 `-k` 值即可。**
 >
 > **参数格式：`-a` 支持 key=value 格式（推荐，跨平台兼容）和 JSON 格式，多个参数用空格分隔。如果值包含空格，需用双引号包裹，如 `-a prompt="A cinematic sunset"`。**
 
@@ -71,12 +71,6 @@ $PYTHON_CMD -m weclaw.agent.mcp_client \
 ```
 
 ## Notes
-
-- 需要 DashScope API Key（环境变量 `DASHSCOPE_API_KEY`）
-- **每次调用必须同时提供 `-u`（base-url）和 `-k`（api-key，环境变量名）参数**
-- 使用清晰、详细的 prompt 可获得更好的图片质量
-- 图片编辑时，`image_url` 必须为公网可访问的 URL，且不能包含中文字符
-- 注意 DashScope 配额限制
 - **无需安装任何额外 Python 包，直接使用 `python -m weclaw.agent.mcp_client` 即可**
 - 如果以上工具列表不满足需求，可使用 `list-tools` 命令获取所有可用工具：
   ```bash

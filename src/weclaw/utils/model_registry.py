@@ -76,6 +76,7 @@ class ModelRegistry:
     def __init__(self, config_path: str | Path | None = None) -> None:
         self._models: dict[str, ModelConfig] = {}
         self._default: str = ""
+        self._summary_model: str = ""
         self._ollama_host: str = DEFAULT_OLLAMA_HOST
         self._auto_discover_ollama_enabled: bool = True
 
@@ -150,6 +151,9 @@ class ModelRegistry:
 
             # 加载默认模型
             self._default = data.get("default", "")
+
+            # 加载摘要模型
+            self._summary_model = data.get("summary_model", "")
 
             # 加载 Ollama 配置
             ollama_config = data.get("ollama", {})
@@ -287,6 +291,10 @@ class ModelRegistry:
     def get_default(self) -> str:
         """获取默认模型名"""
         return self._default
+
+    def get_summary_model(self) -> str:
+        """获取摘要模型名，未配置时回退到默认模型"""
+        return self._summary_model or self._default
 
     def has_model(self, name: str) -> bool:
         """检查模型是否存在"""

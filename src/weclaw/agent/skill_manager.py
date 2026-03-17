@@ -22,29 +22,28 @@ from weclaw.utils.paths import get_config_file_path, get_third_party_skills_dir
 class SkillManager:
     _instance: "SkillManager | None" = None
 
-    def __new__(cls, skills_dir: str | Path | None = None):
-        """实现单例模式，确保只有一个实例"""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self, skills_dir: str | Path | None = None):
-        # 避免重复初始化
-        if hasattr(self, "_initialized"):
-            return
-        
+        """初始化 SkillManager。请勿直接调用，应使用 get_instance() 获取单例。"""
         self.skills_dir = skills_dir
         self._cache: dict[str, dict[str, Any]] = {}
         self.config_file = get_config_file_path()
         self.skill_states: dict[str, bool] = {}  # skill_id -> enabled (True/False)
-        self._initialized = True
 
     @classmethod
     def get_instance(cls, skills_dir: str | Path | None = None) -> "SkillManager":
-        """获取单例实例"""
+        """获取单例实例。
+
+        首次调用时创建实例，后续调用返回相同实例。
+        注意：skills_dir 仅在首次创建时生效。
+        """
         if cls._instance is None:
             cls._instance = cls(skills_dir)
         return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """重置单例（主要用于测试）"""
+        cls._instance = None
 
     def _load_config(self) -> None:
         """从配置文件加载 skill 状态"""

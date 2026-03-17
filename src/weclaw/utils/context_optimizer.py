@@ -13,8 +13,6 @@ from weclaw.utils.paths import get_tool_archive_dir
 
 logger = logging.getLogger(__name__)
 
-# 摘要使用的轻量模型名称（对应 models.yaml 中的配置名）
-SUMMARY_MODEL = "qwen-turbo"
 # 摘要请求超时时间（秒）
 SUMMARY_TIMEOUT = 30
 
@@ -24,6 +22,9 @@ async def summarize_text(content: str, prompt: str | None = None, max_length: in
 
     创建临时的轻量模型实例，调用完成后自动释放。
     可被任意模块调用，不依赖 Agent 类。
+
+    摘要模型名从 models.yaml 的 summary_model 字段读取，
+    未配置时回退到 default 模型。
 
     Args:
         content: 需要摘要的原始文本。
@@ -37,8 +38,9 @@ async def summarize_text(content: str, prompt: str | None = None, max_length: in
         return content
 
     registry = ModelRegistry.get_instance()
+    summary_model_name = registry.get_summary_model()
     llm = registry.create_chat_model(
-        name=SUMMARY_MODEL,
+        name=summary_model_name,
         request_timeout=SUMMARY_TIMEOUT,
     )
 
