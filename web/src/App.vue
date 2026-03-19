@@ -88,7 +88,13 @@ const {
   sendMessage,
   sendSystemMessage,
   clearBuffer,
+  onServerPush,
 } = useWebSocket()
+
+// 注册服务端主动推送消息的处理回调
+onServerPush((content) => {
+  chatViewRef.value?.onServerPushMessage(content)
+})
 
 /**
  * Tab 切换

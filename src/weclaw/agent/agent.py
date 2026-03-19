@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator, Dict, Union
 
 import aiosqlite
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, SystemMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -17,6 +17,8 @@ from weclaw.utils.context_optimizer import (
     archive_tool_result,
     read_archived_tool_result,
     is_archived_tool_message,
+    summarize_and_rebuild_messages,
+    split_into_rounds,
     TOOL_ARCHIVE_MIN_LENGTH,
     TOOL_ARCHIVE_PREFIX,
 )
@@ -118,6 +120,8 @@ class Agent:
         self.config: Dict[str, Any] | None = None
         self._db_conn: aiosqlite.Connection | None = None
         self._session_id: str = "main"
+        self._summary_llm: Any | None = None
+        self._max_token_limit: int = 30000
 
     async def __aenter__(self):
         return self
@@ -136,6 +140,8 @@ class Agent:
         custom_tools: list[BaseTool] | None = None,
         request_timeout: int = 120,
         session_id: str | None = None,
+        summary_model_name: str | None = None,
+        max_token_limit: int = 3000,
         **kwargs: Any,
     ) -> None:
         """初始化底层模型与 agent。
@@ -146,6 +152,8 @@ class Agent:
             custom_tools: 自定义工具列表
             request_timeout: 请求超时时间（秒）
             session_id: 会话 ID，用于持久化检查点
+            summary_model_name: 用于生成摘要的模型名（建议使用便宜小模型），为 None 时使用与主模型相同的模型
+            max_token_limit: 触发上下文摘要压缩的 token 阈值，默认 30000
         """
         # 如果已有旧连接，先关闭防止泄漏
         if self._db_conn is not None:
@@ -159,6 +167,13 @@ class Agent:
             request_timeout=request_timeout,
             stream_usage=True,
         )
+
+        # 创建摘要用小模型（若未指定则复用主模型）
+        self._summary_llm = registry.create_chat_model(
+            name=summary_model_name or model_name,
+            request_timeout=request_timeout,
+        )
+        self._max_token_limit = max_token_limit
 
         # session_id 默认为 "main"，每个 session 独立目录
         resolved_session_id = session_id or "main"
@@ -183,8 +198,7 @@ class Agent:
             tools=tools,
         )
 
-    @staticmethod
-    def _create_read_tool_result_tool(session_id: str) -> BaseTool:
+    def _create_read_tool_result_tool(self, session_id: str) -> BaseTool:
         """创建 read_tool_result 工具，通过闭包绑定 session_id。"""
 
         @tool
@@ -207,6 +221,55 @@ class Agent:
 
     # 工具结果归档：跳过最近 N 轮的 ToolMessage，只归档更早的
     _ARCHIVE_SKIP_RECENT_ROUNDS = 1
+    # 摘要压缩：保留最近几轮完整对话不压缩
+    _SUMMARY_KEEP_RECENT = 3
+
+    async def _summarize_if_needed(self) -> None:
+        """检查对话历史 token 数，超过阈值时用小模型将旧消息压缩为摘要。
+
+        核心逻辑委托给 context_optimizer.summarize_and_rebuild_messages，
+        本方法仅负责获取 state、调用压缩函数、更新 state。
+        """
+        if self.agent is None or self.config is None or self._summary_llm is None:
+            return
+
+        try:
+            state = await self.agent.aget_state(self.config)
+            messages = state.values.get("messages", [])
+
+            result = await summarize_and_rebuild_messages(
+                messages=messages,
+                summary_llm=self._summary_llm,
+                max_token_limit=self._max_token_limit,
+                keep_recent_rounds=self._SUMMARY_KEEP_RECENT,
+            )
+
+            if result is None:
+                return
+
+            all_removals, recent_messages_flat, summary_msg = result
+
+            # 分两步更新 state，确保消息顺序正确：
+            # add_messages reducer 在单次调用中混合 RemoveMessage 和新消息时，
+            # 无法保证新消息之间的相对顺序。
+            # 因此先执行删除，再按正确顺序追加新消息。
+
+            # Step 1: 删除旧轮次 + 旧摘要 + 近期轮次
+            if all_removals:
+                await self.agent.aupdate_state(
+                    self.config,
+                    {"messages": all_removals},
+                )
+
+            # Step 2: 按正确顺序追加：新摘要 → 近期消息
+            # 此时现有列表只剩 [system prompt]，新消息严格按数组顺序追加到末尾
+            # 最终顺序：[system prompt] → [新摘要] → [recent 消息]
+            await self.agent.aupdate_state(
+                self.config,
+                {"messages": [summary_msg] + recent_messages_flat},
+            )
+        except Exception as e:
+            logger.warning(f"Context summarization failed: {e}")
 
     async def _archive_tool_results(self) -> None:
         """扫描对话历史，将超长的 ToolMessage 内容归档到本地文件并替换为摘要。
@@ -218,7 +281,6 @@ class Agent:
 
         try:
             from langchain_core.messages import ToolMessage
-            from weclaw.utils.context_optimizer import split_into_rounds
 
             state = await self.agent.aget_state(self.config)
             messages = state.values.get("messages", [])
@@ -229,8 +291,7 @@ class Agent:
             # 按轮次切分，确定需要保护的最近 N 轮消息 ID 集合
             rounds = split_into_rounds(messages)
             # 过滤掉 SystemMessage 轮次，只统计对话轮次
-            from langchain_core.messages import SystemMessage as _SM
-            dialog_rounds = [r for r in rounds if not (len(r) == 1 and isinstance(r[0], _SM))]
+            dialog_rounds = [r for r in rounds if not (len(r) == 1 and isinstance(r[0], SystemMessage))]
 
             # 最近 N 轮的消息 ID 集合（这些不归档）
             protected_ids: set[str] = set()
@@ -417,6 +478,7 @@ class Agent:
 
         # 流结束后自动清理上下文
         await self._archive_tool_results()
+        await self._summarize_if_needed()
 
     async def astream(
         self,

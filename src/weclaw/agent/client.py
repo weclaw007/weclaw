@@ -5,11 +5,13 @@ import uuid
 from typing import Dict
 
 import websockets
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 
 from weclaw.agent.agent import Agent
 from weclaw.agent.skill_manager import SkillManager
-from weclaw.agent.handlers import SkillHandler, ModelHandler, EnvHandler
+from weclaw.agent.handlers import SkillHandler, ModelHandler, EnvHandler, BaseHandler
+from weclaw.utils.job_scheduler import JobScheduler
+from weclaw.utils.paths import get_jobs_db_path
 
 
 # module logger
@@ -51,8 +53,11 @@ class Client:
         self.agent: Agent | None = None
         self.inject_prompt: str = ""
         self.model_name: str | None = None  # 当前使用的模型配置名
+        self._job_scheduler: JobScheduler | None = None  # 定时任务调度器
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self._tasks: set[asyncio.Task] = set()  # 跟踪所有 create_task 创建的任务
+        self._response_queue: asyncio.Queue = asyncio.Queue()  # 串行执行队列
+        self._queue_worker_task: asyncio.Task | None = None  # 队列消费协程
 
         # 注册系统消息处理器（self 实现了 ClientContext Protocol）
         # 使用 action → handler 字典映射，实现 O(1) 精准路由
@@ -71,6 +76,8 @@ class Client:
                 self._handler_map[action] = handler
 
         logger.info(f"新客户端连接: {websocket.remote_address}")
+        # 启动串行队列 worker
+        self._queue_worker_task = asyncio.ensure_future(self._response_queue_worker())
 
     async def reset_agent(self) -> None:
         """重置 Agent：销毁旧实例，下次对话时会用新配置重新初始化。
@@ -113,17 +120,282 @@ class Client:
                 print(f'message response:\n {response}\n')
                 return response
 
+            # 创建并启动 JobScheduler（定时任务调度器）
+            jobs_db = get_jobs_db_path()
+            self._job_scheduler = JobScheduler(
+                db_path=jobs_db,
+                on_fire=self._handle_job_fire,
+            )
+            await self._job_scheduler.start()
+
+            # 创建定时任务工具
+            _timer_job_tool = self._create_timer_job_tool()
+
             # 初始化 Agent
             self.agent = Agent()
             await self.agent.init(
                 system_prompt=system_prompt,
                 model_name=self.model_name,
-                custom_tools=[message],
+                custom_tools=[message, _timer_job_tool],
             )
             logger.info("Agent 初始化成功")
         except Exception as e:
             logger.exception("初始化 Agent 失败")
             raise
+
+    def _create_timer_job_tool(self) -> BaseTool:
+        """创建定时任务工具，通过闭包引用 JobScheduler。"""
+        scheduler = self._job_scheduler
+
+        def _is_valid_fire_time(fire_time: str) -> bool:
+            """校验 fire_time 是否为合法的 ISO 8601 本地时间格式。"""
+            from datetime import datetime
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+                try:
+                    datetime.strptime(fire_time.split("+")[0].rstrip("Z"), fmt)
+                    return True
+                except ValueError:
+                    continue
+            return False
+
+        @tool
+        async def timer_job(action: str, params: dict) -> str:
+            """定时任务工具，用于创建、更新、删除、查询定时提醒。
+
+            action 可选值及对应 params:
+              - add:    {"fire_time": str, "description": str, "repeat_interval": int, "max_repeat": int}  或  {"interval": int, "description": str, "repeat_interval": int, "max_repeat": int}  创建任务，返回 job_id
+              - update: {"job_id": str, "fire_time": str, "description": str, "repeat_interval": int, "max_repeat": int}  或  {"job_id": str, "interval": int, "description": str, "repeat_interval": int, "max_repeat": int}  更新任务
+              - delete: {"job_id": str}  删除任务
+              - query:  {"job_id": str}  查询任务详情
+              - list:   {}  列出所有 pending 状态的任务
+
+            触发时间参数（fire_time 和 interval 二选一，不可同时传入）:
+              - fire_time: 本地时间的 ISO 8601 格式字符串 YYYY-MM-DDTHH:MM:SS，必须是计算好的绝对时间
+                正确示例: "2026-03-19T12:30:00"
+                错误示例: "now + 1 minute" / "明天上午8点" / "+1h" （禁止传入相对时间表达式）
+              - interval: 从现在起间隔多少秒后首次触发，必须是正整数
+                示例: 用户说"1分钟后" → interval=60，用户说"2小时后" → interval=7200
+                优先使用 interval，避免因时间计算误差导致 fire_time 不准确
+
+            重复任务参数（可选，不传则为一次性任务）:
+              - repeat_interval: 重复间隔秒数，设置后任务将按此间隔重复触发
+                示例: 每分钟重复 → repeat_interval=60，每小时重复 → repeat_interval=3600
+              - max_repeat: 最大重复次数，不传则无限重复（仅 repeat_interval 有值时生效）
+                示例: 重复3次后停止 → max_repeat=3
+            """
+            logger.info(f"timer_job: {action} {params}")
+            if scheduler is None:
+                return "定时任务服务未初始化"
+            try:
+                if action == "add":
+                    description = params.get("description")
+                    fire_time = params.get("fire_time")
+                    interval = params.get("interval")
+                    repeat_interval = params.get("repeat_interval")
+                    max_repeat = params.get("max_repeat")
+                    if not description:
+                        return "参数缺失: description"
+                    if fire_time and interval:
+                        return "fire_time 和 interval 不能同时传入，请二选一"
+                    if not fire_time and not interval:
+                        return "参数缺失: 必须提供 fire_time 或 interval 其中之一"
+                    if interval is not None:
+                        from datetime import datetime, timedelta
+                        try:
+                            interval = int(interval)
+                            if interval <= 0:
+                                return "interval 必须是正整数（单位：秒）"
+                        except (TypeError, ValueError):
+                            return f"interval 格式错误: '{interval}'，必须是正整数（单位：秒）"
+                    elif not _is_valid_fire_time(fire_time):
+                        return (
+                            f"fire_time 格式错误: '{fire_time}'。"
+                            "必须是本地时间的 ISO 8601 格式，如 '2026-03-19T12:30:00'，"
+                            "请先计算出绝对时间再传入，不支持相对时间表达式。"
+                        )
+                    if repeat_interval is not None:
+                        try:
+                            repeat_interval = int(repeat_interval)
+                            if repeat_interval <= 0:
+                                return "repeat_interval 必须是正整数（单位：秒）"
+                        except (TypeError, ValueError):
+                            return f"repeat_interval 格式错误: '{repeat_interval}'，必须是正整数（单位：秒）"
+                    if max_repeat is not None:
+                        try:
+                            max_repeat = int(max_repeat)
+                            if max_repeat <= 0:
+                                return "max_repeat 必须是正整数"
+                        except (TypeError, ValueError):
+                            return f"max_repeat 格式错误: '{max_repeat}'，必须是正整数"
+                    job_id = await scheduler.add_job(
+                        description=description,
+                        fire_time=fire_time,
+                        interval=interval,
+                        repeat_interval=repeat_interval,
+                        max_repeat=max_repeat,
+                    )
+                    fire_display = fire_time or f"{interval}秒后"
+                    repeat_info = f"，每 {repeat_interval} 秒重复" if repeat_interval else ""
+                    max_info = f"，最多 {max_repeat} 次" if max_repeat else ("，无限重复" if repeat_interval else "")
+                    return f"定时任务已创建，job_id: {job_id}，将于 {fire_display} 触发{repeat_info}{max_info}"
+                elif action == "update":
+                    job_id = params.get("job_id")
+                    description = params.get("description")
+                    fire_time = params.get("fire_time")
+                    interval = params.get("interval")
+                    repeat_interval = params.get("repeat_interval")
+                    max_repeat = params.get("max_repeat")
+                    if not all([job_id, description]):
+                        return "参数缺失: job_id 或 description"
+                    if fire_time and interval:
+                        return "fire_time 和 interval 不能同时传入，请二选一"
+                    if not fire_time and not interval:
+                        return "参数缺失: 必须提供 fire_time 或 interval 其中之一"
+                    if interval is not None:
+                        from datetime import datetime, timedelta
+                        try:
+                            interval = int(interval)
+                            if interval <= 0:
+                                return "interval 必须是正整数（单位：秒）"
+                        except (TypeError, ValueError):
+                            return f"interval 格式错误: '{interval}'，必须是正整数（单位：秒）"
+                    elif not _is_valid_fire_time(fire_time):
+                        return (
+                            f"fire_time 格式错误: '{fire_time}'。"
+                            "必须是本地时间的 ISO 8601 格式，如 '2026-03-19T12:30:00'，"
+                            "请先计算出绝对时间再传入，不支持相对时间表达式。"
+                        )
+                    if repeat_interval is not None:
+                        try:
+                            repeat_interval = int(repeat_interval)
+                            if repeat_interval <= 0:
+                                return "repeat_interval 必须是正整数（单位：秒）"
+                        except (TypeError, ValueError):
+                            return f"repeat_interval 格式错误: '{repeat_interval}'，必须是正整数（单位：秒）"
+                    if max_repeat is not None:
+                        try:
+                            max_repeat = int(max_repeat)
+                            if max_repeat <= 0:
+                                return "max_repeat 必须是正整数"
+                        except (TypeError, ValueError):
+                            return f"max_repeat 格式错误: '{max_repeat}'，必须是正整数"
+                    ok = await scheduler.update_job(
+                        job_id=job_id,
+                        description=description,
+                        fire_time=fire_time,
+                        interval=interval,
+                        repeat_interval=repeat_interval,
+                        max_repeat=max_repeat,
+                    )
+                    return "更新成功" if ok else "job_id 不存在或已非 pending 状态"
+                elif action == "delete":
+                    job_id = params.get("job_id")
+                    if not job_id:
+                        return "参数缺失: job_id"
+                    ok = await scheduler.delete_job(job_id)
+                    return "删除成功" if ok else "job_id 不存在或已非 pending 状态"
+                elif action == "query":
+                    job_id = params.get("job_id")
+                    if not job_id:
+                        return "参数缺失: job_id"
+                    job = await scheduler.get_job(job_id)
+                    if job is None:
+                        return "job_id 不存在"
+                    repeat_info = ""
+                    if job.get('repeat_interval'):
+                        repeat_info = (
+                            f"\nrepeat_interval: 每 {job['repeat_interval']} 秒"
+                            f"\nmax_repeat: {job['max_repeat'] if job['max_repeat'] else '无限'}"
+                            f"\nrepeat_count: 已触发 {job['repeat_count']} 次"
+                        )
+                    return (
+                        f"job_id: {job['job_id']}\n"
+                        f"fire_time: {job['fire_time']}\n"
+                        f"description: {job['description']}\n"
+                        f"status: {job['status']}\n"
+                        f"created_at: {job['created_at']}"
+                        f"{repeat_info}"
+                    )
+                elif action == "list":
+                    jobs = await scheduler.list_pending_jobs()
+                    if not jobs:
+                        return "当前没有 pending 状态的定时任务"
+                    lines = [f"共 {len(jobs)} 个 pending 任务:"]
+                    for j in jobs:
+                        repeat_tag = ""
+                        if j.get('repeat_interval'):
+                            max_r = j['max_repeat']
+                            count = j['repeat_count']
+                            repeat_tag = f", 每{j['repeat_interval']}s重复"
+                            repeat_tag += f"(已触发{count}/{max_r}次)" if max_r else f"(已触发{count}次)"
+                        lines.append(
+                            f"  - job_id: {j['job_id']}, "
+                            f"fire_time: {j['fire_time']}, "
+                            f"description: {j['description'][:50]}"
+                            f"{repeat_tag}"
+                        )
+                    return "\n".join(lines)
+                else:
+                    return "未知 action，支持 add, update, delete, query, list"
+            except Exception as e:
+                return f"定时任务异常: {e}"
+
+        return timer_job
+
+    async def _response_queue_worker(self) -> None:
+        """串行消费响应队列，确保同一时刻只有一个 _stream_agent_response 在执行。"""
+        while True:
+            try:
+                coro = await self._response_queue.get()
+                try:
+                    await coro
+                except Exception as e:
+                    logger.exception(f"队列任务执行异常: {e}")
+                finally:
+                    self._response_queue.task_done()
+            except asyncio.CancelledError:
+                break
+
+    async def _enqueue_stream_response(self, prompt, message_id: str) -> None:
+        """将一次 _stream_agent_response 调用投递到串行队列中排队执行。
+
+        Args:
+            prompt: 传给大模型的输入（字符串或 dict）
+            message_id: 本次消息的唯一 ID，用于前端关联响应
+        """
+        await self._response_queue.put(self._stream_agent_response(prompt, message_id))
+
+    async def _stream_agent_response(self, prompt, message_id: str) -> None:
+        """调用 agent.astream_text 并将结果以 start/chunk/end 格式流式推送给客户端。
+
+        Args:
+            prompt: 传给大模型的输入（字符串或 dict）
+            message_id: 本次消息的唯一 ID，用于前端关联响应
+        """
+        # 发送开始标志
+        await self.websocket.send(json.dumps(
+            {"id": message_id, "type": "start"}, ensure_ascii=False
+        ))
+        async for chunk in self.agent.astream_text(prompt):
+            await self.websocket.send(json.dumps(
+                {"id": message_id, "type": "chunk", "chunk": chunk}, ensure_ascii=False
+            ))
+        # 发送结束标志
+        await self.websocket.send(json.dumps(
+            {"id": message_id, "type": "end"}, ensure_ascii=False
+        ))
+
+    async def _handle_job_fire(self, job_id: str, description: str) -> None:
+        """定时任务到期：将任务描述交给大模型处理，由大模型决定如何响应。"""
+        if self.agent is None:
+            logger.warning(f"定时任务到期但 Agent 未初始化: job_id={job_id}")
+            return
+
+        prompt = f"定时任务到期，job_id={job_id}\ndescription={description}\n"
+        message_id = str(uuid.uuid4())
+        logger.info(f"定时任务开始处理: {message_id}， {prompt}")
+        await self._enqueue_stream_response(prompt, message_id)
+        logger.info(f"定时任务已入队: {message_id}")
 
     async def send_and_wait(self, message, timeout=30.0):
         """
@@ -187,18 +459,9 @@ class Client:
         try:
             logger.info(f"处理 user 消息 [{message_id}]: {request}")
 
-            # 发送开始标志
-            start_response = json.dumps({"id": message_id, "type": "start"}, ensure_ascii=False)
-            await self.websocket.send(start_response)
-
-            # 使用 agent 处理并流式返回结果
-            async for chunk in self.agent.astream_text(request):
-                response = json.dumps({"id": message_id, "type": "chunk", "chunk": chunk}, ensure_ascii=False)
-                await self.websocket.send(response)
-
-            # 发送结束标志
-            end_response = json.dumps({"id": message_id, "type": "end"}, ensure_ascii=False)
-            await self.websocket.send(end_response)
+            # 使用 agent 处理并流式返回结果（入队串行执行）
+            await self._enqueue_stream_response(request, message_id)
+            logger.info(f"user 消息已入队 [{message_id}]")
 
         except Exception as e:
             logger.exception(f"处理 user 消息时发生异常: {e}")
@@ -281,6 +544,15 @@ class Client:
                 future.cancel()
         self.pending_requests.clear()
 
+        # 取消队列 worker
+        if self._queue_worker_task and not self._queue_worker_task.done():
+            self._queue_worker_task.cancel()
+            try:
+                await self._queue_worker_task
+            except asyncio.CancelledError:
+                pass
+            self._queue_worker_task = None
+
         # 取消所有正在运行的任务
         for task in self._tasks:
             if not task.done():
@@ -289,6 +561,14 @@ class Client:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+
+        # 关闭 JobScheduler
+        try:
+            if self._job_scheduler is not None:
+                await self._job_scheduler.stop()
+                self._job_scheduler = None
+        except Exception:
+            pass
 
         try:
             if self.agent is not None:

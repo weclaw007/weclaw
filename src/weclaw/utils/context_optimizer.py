@@ -6,7 +6,7 @@
 
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 
 from weclaw.utils.model_registry import ModelRegistry
 from weclaw.utils.paths import get_tool_archive_dir
@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 # 摘要请求超时时间（秒）
 SUMMARY_TIMEOUT = 30
+
+# 摘要标记前缀，用于识别摘要 SystemMessage
+SUMMARY_MARKER = "[Summary of previous conversation]"
 
 
 async def summarize_text(content: str, prompt: str | None = None, max_length: int = 200) -> str:
@@ -156,3 +159,155 @@ def read_archived_tool_result(session_id: str, tool_call_id: str) -> str:
 def is_archived_tool_message(content: str) -> bool:
     """判断 ToolMessage 是否已经被归档替换过。"""
     return isinstance(content, str) and content.startswith(TOOL_ARCHIVE_PREFIX)
+
+
+def serialize_messages_to_text(messages: list) -> str:
+    """将消息列表序列化为纯文本，供摘要模型阅读。
+
+    将 HumanMessage / AIMessage / ToolMessage 等统一转为可读文本，
+    避免将原始 Message 对象直接传给摘要模型导致 API 报错。
+    """
+    lines: list[str] = []
+    for msg in messages:
+        role = msg.type  # "human" / "ai" / "tool" / "system"
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        # AI 消息可能附带 tool_calls，也一并序列化
+        if role == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
+            tool_calls_text = ", ".join(
+                f"{tc.get('name', 'unknown')}({str(tc.get('args', {}))[:120]})"
+                for tc in msg.tool_calls
+            )
+            if content:
+                lines.append(f"[Assistant]: {content}\n  (called tools: {tool_calls_text})")
+            else:
+                lines.append(f"[Assistant]: (called tools: {tool_calls_text})")
+        elif role == "human":
+            lines.append(f"[User]: {content}")
+        elif role == "tool":
+            tool_name = getattr(msg, "name", "") or "tool"
+            # 截断过长的工具结果
+            display = content[:500] + "..." if len(content) > 500 else content
+            lines.append(f"[Tool Result ({tool_name})]: {display}")
+        elif role == "system":
+            lines.append(f"[System]: {content}")
+        else:
+            lines.append(f"[{role}]: {content}")
+    return "\n".join(lines)
+
+
+async def summarize_and_rebuild_messages(
+    messages: list,
+    summary_llm,
+    max_token_limit: int = 30000,
+    keep_recent_rounds: int = 6,
+) -> tuple[list, list, "SystemMessage | None"] | None:
+    """检查消息列表 token 数，超过阈值时生成摘要并返回重建所需的操作。
+
+    压缩策略：
+    - 保留所有 SystemMessage（系统提示词）
+    - 按完整轮次（split_into_rounds）切分，保留最近 keep_recent_rounds 轮
+    - 对更早的旧轮次序列化为纯文本后调用小模型生成摘要
+    - 返回需要删除的 RemoveMessage 列表、新摘要消息和需要重新添加的近期消息
+
+    Args:
+        messages: 当前完整消息列表（从 state 中获取）
+        summary_llm: 用于生成摘要的 LLM 实例
+        max_token_limit: 触发压缩的 token 阈值
+        keep_recent_rounds: 保留最近几轮完整对话不压缩
+
+    Returns:
+        如果不需要压缩返回 None；
+        否则返回 (all_removals, recent_messages_flat, summary_msg) 三元组：
+        - all_removals: 需要删除的 RemoveMessage 列表
+        - recent_messages_flat: 需要重新添加的近期消息列表
+        - summary_msg: 新的摘要 SystemMessage
+    """
+    if not messages:
+        return None
+
+    # 估算 token 数（使用字符数粗估，避免额外 API 调用）
+    total_chars = sum(
+        len(m.content) if isinstance(m.content, str) else len(str(m.content))
+        for m in messages
+    )
+    # 粗估：中文约 1.5 字符/token，英文约 4 字符/token，取保守值 2 字符/token
+    estimated_tokens = total_chars // 2
+
+    if estimated_tokens <= max_token_limit:
+        return None
+
+    logger.info(
+        f"Estimated tokens {estimated_tokens} exceeds limit {max_token_limit}, "
+        f"starting context summarization..."
+    )
+
+    # --- Step 1: 分离 SystemMessage 与对话消息 ---
+    system_prompt_messages: list = []   # 纯系统提示词
+    old_summary_messages: list = []     # 旧的摘要 SystemMessage（需删除）
+    non_system_messages: list = []      # 非 SystemMessage 的对话消息
+
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if SUMMARY_MARKER in content_str:
+                old_summary_messages.append(msg)
+            else:
+                system_prompt_messages.append(msg)
+        else:
+            non_system_messages.append(msg)
+
+    # --- Step 2: 对非 system 消息按完整轮次切分 ---
+    dialog_rounds = split_into_rounds(non_system_messages)
+
+    if len(dialog_rounds) <= keep_recent_rounds:
+        logger.info("Dialog rounds not enough for summarization, skipping")
+        return None
+
+    # --- Step 3: 切分旧轮次和近期轮次 ---
+    old_rounds = dialog_rounds[:-keep_recent_rounds]
+    recent_rounds = dialog_rounds[-keep_recent_rounds:]
+
+    # 将旧轮次的消息展平并序列化为纯文本
+    old_messages_flat: list = []
+    for r in old_rounds:
+        old_messages_flat.extend(r)
+
+    # 把旧摘要的文本也纳入新的摘要输入，确保历史信息不丢失
+    old_summary_text = ""
+    if old_summary_messages:
+        old_summary_text = "\n".join(
+            m.content if isinstance(m.content, str) else str(m.content)
+            for m in old_summary_messages
+        ) + "\n\n"
+
+    conversation_text = old_summary_text + serialize_messages_to_text(old_messages_flat)
+
+    # --- Step 4: 调用小模型生成摘要 ---
+    summary_response = await summary_llm.ainvoke([
+        SystemMessage(
+            content="Please summarize the following conversation history concisely, "
+                    "retaining all key information, conclusions, and important details."
+        ),
+        HumanMessage(content=conversation_text),
+    ])
+    summary_text = summary_response.content if hasattr(summary_response, "content") else str(summary_response)
+
+    # --- Step 5: 构建 RemoveMessage 列表和新摘要消息 ---
+    remove_old = [RemoveMessage(id=m.id) for m in old_messages_flat]
+    remove_old_summary = [RemoveMessage(id=m.id) for m in old_summary_messages]
+
+    recent_messages_flat: list = []
+    for r in recent_rounds:
+        recent_messages_flat.extend(r)
+    remove_recent = [RemoveMessage(id=m.id) for m in recent_messages_flat]
+
+    all_removals = remove_old + remove_old_summary + remove_recent
+    summary_msg = SystemMessage(content=f"{SUMMARY_MARKER}\n{summary_text}")
+
+    logger.info(
+        f"Context summarization done: {len(old_rounds)} old rounds ({len(old_messages_flat)} messages) "
+        f"+ {len(old_summary_messages)} old summary(s) "
+        f"→ will remove & replace with 1 summary, keep recent {len(recent_rounds)} rounds"
+    )
+
+    return (all_removals, recent_messages_flat, summary_msg)

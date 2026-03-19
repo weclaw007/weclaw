@@ -85,3 +85,17 @@ def get_tool_archive_dir(session_id: str = "main") -> Path:
     archive_dir = get_session_dir(session_id) / "tool_archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     return archive_dir
+
+
+def get_jobs_db_path(session_id: str = "main") -> str:
+    """获取指定会话的定时任务数据库文件路径。
+
+    默认为 <data_dir>/sessions/<session_id>/jobs.db。
+
+    Args:
+        session_id: 会话 ID，默认为 "main"
+
+    Returns:
+        str: 定时任务数据库文件的绝对路径字符串
+    """
+    return str(get_session_dir(session_id) / "jobs.db")

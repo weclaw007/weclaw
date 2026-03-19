@@ -13,6 +13,7 @@ export function useWebSocket(url = 'ws://localhost:4567') {
   const currentModel = ref('')
   const responseBuffers = ref({})      // { messageId: string }
   const responseFutures = ref({})      // { messageId: { resolve, reject } }
+  const serverPushHandlers = ref([])   // 服务端主动推送的消息回调列表
 
   /**
    * 建立 WebSocket 连接
@@ -90,9 +91,28 @@ export function useWebSocket(url = 'ws://localhost:4567') {
     } else if (msgType === 'end') {
       const future = responseFutures.value[messageId]
       if (future) {
+        // 用户发起的请求，resolve 对应的 promise
         future.resolve(responseBuffers.value[messageId])
         delete responseFutures.value[messageId]
+      } else {
+        // 服务端主动推送的消息（如定时任务触发），通知所有注册的回调
+        const content = responseBuffers.value[messageId] || ''
+        serverPushHandlers.value.forEach((handler) => handler(content, messageId))
       }
+      delete responseBuffers.value[messageId]
+    }
+  }
+
+  /**
+   * 注册服务端主动推送消息的处理回调
+   * @param {Function} handler - (content: string, messageId: string) => void
+   * @returns {Function} 取消注册的函数
+   */
+  function onServerPush(handler) {
+    serverPushHandlers.value.push(handler)
+    return () => {
+      const idx = serverPushHandlers.value.indexOf(handler)
+      if (idx !== -1) serverPushHandlers.value.splice(idx, 1)
     }
   }
 
@@ -256,5 +276,6 @@ export function useWebSocket(url = 'ws://localhost:4567') {
     sendMessage,
     sendSystemMessage,
     clearBuffer,
+    onServerPush,
   }
 }

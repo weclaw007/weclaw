@@ -175,8 +175,16 @@ function onMessageComplete() {
   currentMessageId.value = null
 }
 
+/**
+ * 接收服务端主动推送的消息（如定时任务触发）
+ */
+function onServerPushMessage(content) {
+  messages.value.push({ role: 'assistant', content })
+  scrollToBottom()
+}
+
 // 暴露方法供父组件调用
-defineExpose({ onMessageComplete })
+defineExpose({ onMessageComplete, onServerPushMessage })
 </script>
 
 <style scoped>

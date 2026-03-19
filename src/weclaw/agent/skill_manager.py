@@ -207,11 +207,13 @@ class SkillManager:
         return self._cache
 
     def format_as_json(self) -> str:
-        """将技能缓存格式化为 JSON 字符串，只包含当前操作系统支持的技能。"""
+        """将技能缓存格式化为 JSON 字符串，只包含当前操作系统支持且未被禁用的技能。"""
         skills_list = []
         compatible_skills = self.get_skills_for_current_os()
         
         for skill_id, metadata in compatible_skills.items():
+            if not self.is_skill_enabled(skill_id):
+                continue
             location = metadata.get("_location", "")
             # 取 SKILL.md 所在目录作为技能目录，保留 ~ 缩写
             if location:

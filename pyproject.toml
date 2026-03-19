@@ -21,6 +21,7 @@ dependencies = [
     "websockets",
     "aiosqlite",
     "langgraph-checkpoint-sqlite",
+    "apscheduler",
 ]
 
 [project.optional-dependencies]
