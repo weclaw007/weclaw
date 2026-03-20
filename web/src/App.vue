@@ -53,7 +53,9 @@
         :response-buffers="responseBuffers"
         :models-list="modelsList"
         :current-model="currentModel"
+        :persona="persona"
         @send-message="onSendMessage"
+        @set-persona="onSetPersona"
       />
       <SkillsView
         v-show="activeTab === 'skills'"
@@ -84,6 +86,7 @@ const {
   modelsList,
   defaultModel,
   currentModel,
+  persona,
   responseBuffers,
   sendMessage,
   sendSystemMessage,
@@ -131,6 +134,13 @@ function onSendMessage(text, callback) {
       console.error('消息发送失败:', err)
       chatViewRef.value?.onMessageComplete()
     })
+}
+
+/**
+ * 设置人格
+ */
+function onSetPersona(personaText) {
+  sendSystemMessage('set_persona', { persona: personaText })
 }
 
 /**

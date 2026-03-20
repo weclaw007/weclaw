@@ -65,13 +65,15 @@ Python command compatibility:
 PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 \```
 
-调用示例（`-k` 传入的是环境变量名，程序会自动读取环境变量的值；`-a` 支持 key=value 格式和 JSON 格式）：
+调用示例（`-k` 传入的是环境变量名，程序会自动读取环境变量的值；`-a` 使用 JSON 格式传入参数；`-H` 可传入自定义 HTTP 头，每个 header 需单独 `-H` 指定）：
 
 \```bash
 $PYTHON_CMD -m weclaw.agent.mcp_client \
   -u https://your-mcp-server-url/sse \
   -k YOUR_API_KEY \
-  call_command command_name -a param1="value with spaces" param2=value2
+  -H 'X-Custom-Header=value' \
+  -H 'X-Another=value2' \
+  call_command command_name -a '{"param1": "value", "param2": "value2"}'
 \```
 
 ## Notes
@@ -164,12 +166,27 @@ python -m weclaw.agent.mcp_client \
 python -m weclaw.agent.mcp_client \
   -u https://your-mcp-server-url/sse \
   -k YOUR_API_KEY \
-  call_command command_name -a param=value
+  call_command command_name -a '{"param": "value"}'
 ```
 
-> **参数格式说明**：`-a` 支持两种格式：
-> - **key=value 格式（推荐）**：跨平台兼容，无引号转义问题。如 `-a city=北京 count=5`。**如果值包含空格，需用双引号包裹**，如 `-a prompt="A cinematic sunset"`
-> - **JSON 格式**：如 `-a '{"city": "北京", "count": 5}'`（注意 Windows 下需要转义双引号）
+### 传入自定义 HTTP 头
+
+某些 MCP 服务器可能需要额外的 HTTP 头（如自定义认证、租户标识等），使用 `-H`/`--header` 参数：
+
+```bash
+python -m weclaw.agent.mcp_client \
+  -u https://your-mcp-server-url/sse \
+  -k YOUR_API_KEY \
+  -H 'X-Tenant-Id=my-tenant' \
+  -H 'X-Custom=value' \
+  call_command command_name -a '{"param": "value"}'
+```
+
+> **注意**：自定义 header 可以覆盖默认的 `Authorization` 头。如果你的 MCP 服务器使用非 Bearer 的认证方式，可以通过 `-H 'Authorization=Basic xxx'` 来覆盖。
+
+> **参数格式说明**：
+> - **`-a` 工具参数**：使用 JSON 格式传入，如 `-a '{"city": "北京", "count": 5}'`。
+> - **`-H` 自定义 HTTP 头**，格式为 key=value，每个 header 需单独 `-H` 指定。如 `-H 'X-Token=abc' -H 'X-Org=myorg'`
 
 ### 查看已加载的技能
 
@@ -196,6 +213,9 @@ python -m weclaw.agent.mcp_client \
 
 ### Q: 如何获取 MCP 服务器提供的工具列表？
 **A**: 使用 `python -m weclaw.agent.mcp_client -u <URL> -k <ENV_VAR_NAME> list-tools` 命令即可列出所有可用工具及其参数。`-k` 传入环境变量名（如 `DASHSCOPE_API_KEY`），程序会自动读取环境变量的值。
+
+### Q: 如何传入自定义 HTTP 头？
+**A**: 使用 `-H` 或 `--header` 参数，格式为 `key=value`，每个 header 需单独 `-H` 指定。例如：`'-H 'X-Tenant-Id=my-tenant' -H 'X-Custom=value'`。自定义 header 会合并到默认 headers 中，也可以覆盖默认的 `Authorization` 头。
 
 ### Q: 技能没有被 Agent 识别怎么办？
 **A**: 检查以下几点：

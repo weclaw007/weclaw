@@ -9,23 +9,43 @@ from langchain_core.tools import BaseTool, tool
 
 from weclaw.agent.agent import Agent
 from weclaw.agent.skill_manager import SkillManager
-from weclaw.agent.handlers import SkillHandler, ModelHandler, EnvHandler, BaseHandler
+from weclaw.agent.handlers import SkillHandler, ModelHandler, EnvHandler, PersonaHandler, BaseHandler
+from weclaw.utils.agent_config import AgentConfig
 from weclaw.utils.job_scheduler import JobScheduler
 from weclaw.utils.paths import get_jobs_db_path
+
+from datetime import datetime
 
 
 # module logger
 logger = logging.getLogger(__name__)
 
 
-def build_system_prompt(skill_manager: SkillManager, read_skill_name: str = "read_skill") -> str:
+def build_system_prompt(skill_manager: SkillManager, read_skill_name: str = "read_skill", config: AgentConfig | None = None) -> str:
     """构建包含技能列表和工具结果归档提示的系统提示词。
 
     这是项目中构建 system prompt 的唯一入口，agent.py 和 client.py 都应复用此函数。
+    如果配置了人格设置，会自动注入到提示词开头。
+
+    Args:
+        skill_manager: 技能管理器
+        read_skill_name: 读取技能的工具名
+        config: Agent 配置管理器，传入以避免重复创建
     """
     skills_json = skill_manager.format_as_json()
 
-    prompt_lines = [
+    # 读取人格配置
+    persona = config.persona if config else ""
+
+    prompt_lines = []
+
+    # 如果配置了人格，注入到提示词开头
+    if persona:
+        prompt_lines.append("## Persona")
+        prompt_lines.append(persona)
+        prompt_lines.append("")
+
+    prompt_lines += [
         "## Tool Result Archive",
         "In conversation history, some earlier tool call results have been archived.",
         'You will see "[Tool Result Archived] ID: xxx" markers with tool name and args info.',
@@ -34,13 +54,28 @@ def build_system_prompt(skill_manager: SkillManager, read_skill_name: str = "rea
         "",
         "## Skills (mandatory)",
         "Before replying: scan the available_skills JSON array below.",
+        "Skill selection rules:",
         f"- If exactly one skill clearly applies: read its SKILL.md at 'name' with `{read_skill_name}`, then follow it.",
-        "- If multiple could apply: choose the most specific one, then read/follow it.",
+        "- If the user request involves multiple steps that span different skills:",
+        "  1. Break the task into sequential sub-steps.",
+        "  2. Read the most relevant skill first, execute it.",
+        "  3. Then read and execute the next skill as needed.",
+        "  4. Continue until all sub-steps are complete.",
         "- If none clearly apply: do not read any SKILL.md.",
-        "Constraints: never read more than one skill up front; only read after selecting.",
         "When a skill file references a relative path, join it with the `location` field (`location` / relative path)",
         "",
         skills_json,
+        "",
+        "## Task Planning",
+        "For complex user requests that may involve multiple tools or skills:",
+        "1. **Analyze**: Identify all the sub-tasks needed to fulfill the request.",
+        "2. **Plan**: Determine the execution order and dependencies between steps.",
+        "3. **Execute**: Carry out each sub-task in sequence, using the appropriate skill/tool.",
+        "4. **Summarize**: After all steps complete, give the user a concise summary of what was done.",
+        "",
+        "Example: User says 'Help me schedule a meeting with Xiao Wang tomorrow at 3pm'",
+        "  → Sub-tasks: (1) Create meeting via tencent-meeting skill,",
+        "    (2) Set a reminder 15min before via timer_job tool.",
         "",
     ]
 
@@ -53,6 +88,8 @@ class Client:
         self.agent: Agent | None = None
         self.inject_prompt: str = ""
         self.model_name: str | None = None  # 当前使用的模型配置名
+        self.session_id: str = "main"  # 会话 ID，每个 agent 独立配置
+        self.config: AgentConfig = AgentConfig(session_id=self.session_id)  # 每个 session 独立配置
         self._job_scheduler: JobScheduler | None = None  # 定时任务调度器
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self._tasks: set[asyncio.Task] = set()  # 跟踪所有 create_task 创建的任务
@@ -66,6 +103,7 @@ class Client:
             SkillHandler(websocket),
             ModelHandler(websocket, self),
             EnvHandler(websocket, self),
+            PersonaHandler(websocket, self),
         ]:
             for action in handler.ACTIONS:
                 if action in self._handler_map:
@@ -100,7 +138,7 @@ class Client:
             skill_manager = SkillManager.get_instance()
 
             # 使用 build_system_prompt 构建系统提示词
-            system_prompt = build_system_prompt(skill_manager)
+            system_prompt = build_system_prompt(skill_manager, config=self.config)
             if self.inject_prompt:
                 system_prompt += "\n\n" + self.inject_prompt
 
@@ -122,9 +160,20 @@ class Client:
 
             # 创建并启动 JobScheduler（定时任务调度器）
             jobs_db = get_jobs_db_path()
+
+            # 读取预警配置
+            alert_kwargs = {}
+            if self.config.job_alert_enabled:
+                alert_kwargs = {
+                    "on_alert": self._handle_job_alert,
+                    "alert_check_interval": self.config.job_alert_check_interval,
+                    "alert_ahead_seconds": self.config.job_alert_ahead_seconds,
+                }
+
             self._job_scheduler = JobScheduler(
                 db_path=jobs_db,
                 on_fire=self._handle_job_fire,
+                **alert_kwargs,
             )
             await self._job_scheduler.start()
 
@@ -341,6 +390,34 @@ class Client:
                 return f"定时任务异常: {e}"
 
         return timer_job
+
+    # ── 定时任务回调 ──────────────────────────────────────
+
+    async def _handle_job_alert(self, upcoming_jobs: list[dict]) -> None:
+        """定时任务预警回调：由 JobScheduler 巡检到即将到期的任务后调用。
+
+        将即将到期的任务信息组装成 prompt，交给大模型生成友好的提醒文案，
+        通过 WebSocket 流式推送给前端。
+        """
+        if self.agent is None:
+            logger.warning("定时任务预警回调但 Agent 未初始化")
+            return
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alert_lines = [f"[系统预警] 当前时间: {now_str}"]
+        alert_lines.append(f"以下 {len(upcoming_jobs)} 个定时任务即将到期，请提醒用户注意：")
+        alert_lines.append("")
+        for job in upcoming_jobs:
+            alert_lines.append(f"- 任务描述: {job['description']}")
+            alert_lines.append(f"  到期时间: {job['fire_time']}")
+            alert_lines.append(f"  任务ID: {job['job_id']}")
+            alert_lines.append("")
+        alert_lines.append("请用简洁友好的方式提醒用户这些即将到期的任务，告知剩余时间。")
+
+        prompt = "\n".join(alert_lines)
+        message_id = str(uuid.uuid4())
+        logger.info(f"定时任务预警推送: {len(upcoming_jobs)} 个任务即将到期")
+        await self._enqueue_stream_response(prompt, message_id)
 
     async def _response_queue_worker(self) -> None:
         """串行消费响应队列，确保同一时刻只有一个 _stream_agent_response 在执行。"""

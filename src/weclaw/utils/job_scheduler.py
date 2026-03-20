@@ -38,28 +38,44 @@ class JobScheduler:
         self,
         db_path: str,
         on_fire: Callable[[str, str], Awaitable[None]],
+        on_alert: Callable[[list[dict]], Awaitable[None]] | None = None,
+        alert_check_interval: int = 600,
+        alert_ahead_seconds: int = 900,
     ) -> None:
         """
         Args:
-            db_path: SQLite 数据库文件路径（按 session 隔离）
-            on_fire: 任务到期回调，签名 (job_id, description) -> None
+            db_path:              SQLite 数据库文件路径（按 session 隔离）
+            on_fire:              任务到期回调，签名 (job_id, description) -> None
+            on_alert:             预警回调，签名 (upcoming_jobs: list[dict]) -> None
+                                  传入即将到期的任务列表，由调用方决定如何通知用户。
+                                  为 None 则不启用预警巡检。
+            alert_check_interval: 预警巡检间隔秒数，默认 600（10 分钟）
+            alert_ahead_seconds:  提前预警秒数，默认 900（15 分钟）
         """
         self._db_path = db_path
         self._on_fire = on_fire
+        self._on_alert = on_alert
+        self._alert_check_interval = alert_check_interval
+        self._alert_ahead_seconds = alert_ahead_seconds
         self._db: aiosqlite.Connection | None = None
         self._scheduler = AsyncIOScheduler()
+        self._alerted_job_ids: set[str] = set()  # 已预警过的 job_id，防止重复提醒
 
     async def start(self) -> None:
-        """初始化数据库表 + 启动 APScheduler + 恢复所有 pending 任务。"""
+        """初始化数据库表 + 启动 APScheduler + 恢复所有 pending 任务 + 启动预警巡检。"""
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
         await self._create_table()
         self._scheduler.start()
         await self._restore_pending_jobs()
+        self._start_alert_checker()
         logger.info(f"JobScheduler 已启动，数据库: {self._db_path}")
 
+    # 预警巡检任务的固定 job_id
+    _ALERT_JOB_ID = "__alert_checker__"
+
     async def stop(self) -> None:
-        """停止调度器：关闭 APScheduler + 关闭数据库连接。"""
+        """停止调度器：关闭 APScheduler（自动清理预警巡检 job）+ 关闭数据库连接。"""
         if self._scheduler.running:
             self._scheduler.shutdown(wait=False)
 
@@ -224,6 +240,104 @@ class JobScheduler:
                 }
                 for row in rows
             ]
+
+    async def list_upcoming_jobs(self, within_seconds: int = 900) -> list[dict]:
+        """列出即将在指定秒数内到期的 pending 任务（不含重复任务）。
+
+        仅返回一次性任务（repeat_interval 为 NULL），用于到期预警提醒。
+        重复任务本身会按周期自动触发，不需要额外预警。
+
+        Args:
+            within_seconds: 未来多少秒内到期的任务，默认 900（15 分钟）
+
+        Returns:
+            即将到期的任务列表，按 fire_time 升序排列
+        """
+        now = datetime.now()
+        deadline = now + timedelta(seconds=within_seconds)
+        now_str = now.strftime("%Y-%m-%dT%H:%M:%S")
+        deadline_str = deadline.strftime("%Y-%m-%dT%H:%M:%S")
+
+        async with self._db.execute(
+            "SELECT job_id, fire_time, description, status, created_at, "
+            "repeat_interval, max_repeat, repeat_count "
+            "FROM jobs "
+            "WHERE status = ? AND fire_time > ? AND fire_time <= ? "
+            "AND repeat_interval IS NULL "
+            "ORDER BY fire_time ASC",
+            (STATUS_PENDING, now_str, deadline_str),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "job_id": row["job_id"],
+                    "fire_time": row["fire_time"],
+                    "description": row["description"],
+                    "status": row["status"],
+                    "created_at": row["created_at"],
+                    "repeat_interval": row["repeat_interval"],
+                    "max_repeat": row["max_repeat"],
+                    "repeat_count": row["repeat_count"],
+                }
+                for row in rows
+            ]
+
+    # ── 预警巡检 ──────────────────────────────────────────────
+
+    def _start_alert_checker(self) -> None:
+        """通过 APScheduler 注册预警巡检 job（如果配置了 on_alert 回调）。
+
+        使用 IntervalTrigger 周期性触发 _check_and_alert，首次延迟 30 秒启动。
+        相比 asyncio.sleep 循环，使用 APScheduler 统一调度更高效、更一致。
+        """
+        if self._on_alert is None:
+            logger.info("未配置 on_alert 回调，跳过预警巡检")
+            return
+
+        logger.info(
+            f"启动定时任务到期预警巡检: 每 {self._alert_check_interval} 秒检查一次，"
+            f"提前 {self._alert_ahead_seconds} 秒预警"
+        )
+
+        # 首次延迟 30 秒后触发，之后按 check_interval 周期执行
+        start_date = datetime.now() + timedelta(seconds=30)
+        self._scheduler.add_job(
+            func=self._check_and_alert,
+            trigger=IntervalTrigger(
+                seconds=self._alert_check_interval,
+                start_date=start_date,
+            ),
+            id=self._ALERT_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=60,
+        )
+
+    async def _check_and_alert(self) -> None:
+        """执行一次巡检：查找即将到期的任务，过滤已预警的，回调通知。"""
+        upcoming_jobs = await self.list_upcoming_jobs(
+            within_seconds=self._alert_ahead_seconds
+        )
+        if not upcoming_jobs:
+            return
+
+        # 过滤已预警的任务
+        new_alerts = []
+        for job in upcoming_jobs:
+            job_id = job["job_id"]
+            if job_id not in self._alerted_job_ids:
+                new_alerts.append(job)
+                self._alerted_job_ids.add(job_id)
+
+        if not new_alerts:
+            return
+
+        logger.info(f"定时任务预警: {len(new_alerts)} 个任务即将到期")
+
+        # 通过回调通知调用方
+        try:
+            await self._on_alert(new_alerts)
+        except Exception as e:
+            logger.exception(f"预警回调执行失败: {e}")
 
     # ── 内部方法 ──────────────────────────────────────────────
 

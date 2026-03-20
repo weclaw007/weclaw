@@ -16,7 +16,7 @@ os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
 
-from weclaw.utils.message import build_user_message, build_system_message
+from weclaw.utils.message import build_user_message, build_system_message, build_tool_message
 
 # 配置日志
 logging.basicConfig(
@@ -63,6 +63,11 @@ class FeishuBot:
         # 存储消息 ID 到 chat_id 的映射
         self._chat_map: dict[str, str] = {}
 
+    @property
+    def _greeting_chat_id(self) -> str:
+        """获取用于工具消息交互的默认会话 ID"""
+        return os.getenv("LARK_GREETING_CHAT_ID", "")
+
     def _send_feishu_reply(self, chat_id: str, text: str) -> None:
         """发送飞书消息
 
@@ -96,6 +101,272 @@ class FeishuBot:
 
         except Exception as e:
             logger.exception(f"发送飞书消息异常: {e}")
+
+    def _upload_image(self, image_path: str) -> str | None:
+        """上传图片到飞书，返回 image_key
+
+        Args:
+            image_path: 本地图片文件路径
+
+        Returns:
+            image_key 字符串，上传失败返回 None
+        """
+        try:
+            # 展开 ~ 为用户主目录
+            image_path = os.path.expanduser(image_path)
+
+            if not os.path.isfile(image_path):
+                logger.error(f"图片文件不存在: {image_path}")
+                return None
+
+            with open(image_path, "rb") as f:
+                request = CreateImageRequest.builder() \
+                    .request_body(
+                        CreateImageRequestBody.builder()
+                        .image_type("message")
+                        .image(f)
+                        .build()
+                    ).build()
+
+                response = self.lark_client.im.v1.image.create(request)
+
+            if not response.success():
+                logger.error(
+                    f"上传图片失败: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return None
+
+            image_key = response.data.image_key
+            logger.info(f"图片上传成功: {image_path} -> {image_key}")
+            return image_key
+
+        except Exception as e:
+            logger.exception(f"上传图片异常: {e}")
+            return None
+
+    # 文件类型映射：文件后缀 -> 飞书 file_type
+    _FILE_TYPE_MAP = {
+        ".opus": "opus", ".mp4": "mp4", ".pdf": "pdf",
+        ".doc": "doc", ".docx": "doc",
+        ".xls": "xls", ".xlsx": "xls",
+        ".ppt": "ppt", ".pptx": "ppt",
+    }
+
+    def _upload_file(self, file_path: str) -> str | None:
+        """上传文件到飞书，返回 file_key
+
+        Args:
+            file_path: 本地文件路径
+
+        Returns:
+            file_key 字符串，上传失败返回 None
+        """
+        try:
+            # 展开 ~ 为用户主目录
+            file_path = os.path.expanduser(file_path)
+
+            if not os.path.isfile(file_path):
+                logger.error(f"文件不存在: {file_path}")
+                return None
+
+            file_name = os.path.basename(file_path)
+            suffix = os.path.splitext(file_name)[1].lower()
+            file_type = self._FILE_TYPE_MAP.get(suffix, "stream")
+
+            with open(file_path, "rb") as f:
+                request = CreateFileRequest.builder() \
+                    .request_body(
+                        CreateFileRequestBody.builder()
+                        .file_type(file_type)
+                        .file_name(file_name)
+                        .file(f)
+                        .build()
+                    ).build()
+
+                response = self.lark_client.im.v1.file.create(request)
+
+            if not response.success():
+                logger.error(
+                    f"上传文件失败: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return None
+
+            file_key = response.data.file_key
+            logger.info(f"文件上传成功: {file_path} -> {file_key}")
+            return file_key
+
+        except Exception as e:
+            logger.exception(f"上传文件异常: {e}")
+            return None
+
+    def _send_feishu_file(self, chat_id: str, file_path: str) -> bool:
+        """发送文件消息到飞书
+
+        Args:
+            chat_id: 飞书会话 ID
+            file_path: 本地文件路径
+
+        Returns:
+            是否发送成功
+        """
+        file_key = self._upload_file(file_path)
+        if not file_key:
+            logger.error(f"文件发送失败: 无法上传文件 {file_path}")
+            return False
+
+        try:
+            file_name = os.path.basename(os.path.expanduser(file_path))
+            content = json.dumps({"file_key": file_key, "file_name": file_name})
+
+            request = CreateMessageRequest.builder() \
+                .receive_id_type("chat_id") \
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(chat_id)
+                    .msg_type("file")
+                    .content(content)
+                    .build()
+                ).build()
+
+            response = self.lark_client.im.v1.message.create(request)
+
+            if not response.success():
+                logger.error(
+                    f"发送文件消息失败: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return False
+
+            logger.info(f"已发送文件消息到会话 {chat_id}: {file_path}")
+            return True
+
+        except Exception as e:
+            logger.exception(f"发送文件消息异常: {e}")
+            return False
+
+    def _send_feishu_image(self, chat_id: str, image_path: str) -> bool:
+        """发送图片消息到飞书
+
+        Args:
+            chat_id: 飞书会话 ID
+            image_path: 本地图片文件路径
+
+        Returns:
+            是否发送成功
+        """
+        image_key = self._upload_image(image_path)
+        if not image_key:
+            logger.error(f"图片发送失败: 无法上传图片 {image_path}")
+            return False
+
+        try:
+            content = json.dumps({"image_key": image_key})
+
+            request = CreateMessageRequest.builder() \
+                .receive_id_type("chat_id") \
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(chat_id)
+                    .msg_type("image")
+                    .content(content)
+                    .build()
+                ).build()
+
+            response = self.lark_client.im.v1.message.create(request)
+
+            if not response.success():
+                logger.error(
+                    f"发送图片消息失败: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return False
+
+            logger.info(f"已发送图片消息到会话 {chat_id}: {image_path}")
+            return True
+
+        except Exception as e:
+            logger.exception(f"发送图片消息异常: {e}")
+            return False
+
+    async def _reply_tool_message(self, message_id: str, status: str, **kwargs) -> None:
+        """通过 WebSocket 回复工具消息结果给大模型
+
+        Args:
+            message_id: 原始工具消息的 ID
+            status: 执行状态，如 "success" 或 "error"
+            **kwargs: 其他业务字段，如 error_msg 等
+        """
+        reply = build_tool_message(message_id, status=status, **kwargs)
+        if self.websocket:
+            try:
+                await self.websocket.send(json.dumps(reply, ensure_ascii=False))
+                logger.info(f"已回复工具消息: id={message_id}, status={status}")
+            except Exception as e:
+                logger.error(f"回复工具消息失败: {e}")
+        else:
+            logger.error("WebSocket 连接不可用，无法回复工具消息")
+
+    async def _handle_tool_message(self, response: dict) -> None:
+        """处理大模型发送过来的工具消息
+
+        工具消息用来和 LARK_GREETING_CHAT_ID 标识的用户交互。
+        根据 action 字段分发到不同的处理方法，执行结果通过 WebSocket 回复给大模型。
+
+        Args:
+            response: WebSocket 收到的工具消息，格式如:
+                {"id": "...", "type": "tool", "action": "send_pic", "path": "xxx.png"}
+        """
+        chat_id = self._greeting_chat_id
+        if not chat_id:
+            logger.warning("未配置 LARK_GREETING_CHAT_ID，无法处理工具消息")
+            return
+
+        action = response.get("action", "")
+        message_id = response.get("id", "")
+
+        logger.info(f"处理工具消息: id={message_id}, action={action}")
+
+        if action == "send_pic":
+            # 发送图片
+            path = response.get("path", "")
+            if not path:
+                logger.error(f"send_pic 缺少 path 参数: {response}")
+                await self._reply_tool_message(message_id, "error", error_msg="缺少图片路径")
+                return
+            ok = self._send_feishu_image(chat_id, path)
+            if ok:
+                await self._reply_tool_message(message_id, "success", action=action, path=path)
+            else:
+                await self._reply_tool_message(message_id, "error", error_msg=f"图片发送失败: {path}")
+
+        elif action == "send_text":
+            # 发送文本消息
+            text = response.get("text", "")
+            if not text:
+                logger.error(f"send_text 缺少 text 参数: {response}")
+                await self._reply_tool_message(message_id, "error", error_msg="缺少文本内容")
+                return
+            self._send_feishu_reply(chat_id, text)
+            await self._reply_tool_message(message_id, "success", action=action)
+
+        elif action == "send_file":
+            # 发送文件
+            path = response.get("path", "")
+            if not path:
+                logger.error(f"send_file 缺少 path 参数: {response}")
+                await self._reply_tool_message(message_id, "error", error_msg="缺少文件路径")
+                return
+            ok = self._send_feishu_file(chat_id, path)
+            if ok:
+                await self._reply_tool_message(message_id, "success", action=action, path=path)
+            else:
+                await self._reply_tool_message(message_id, "error", error_msg=f"文件发送失败: {path}")
+
+        else:
+            logger.warning(f"未知的工具消息 action: {action}, 完整消息: {response}")
+            await self._reply_tool_message(message_id, "error", error_msg=f"不支持的操作: {action}")
 
     def _handle_receive_message(self, data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         """处理接收到的飞书消息事件
@@ -279,6 +550,11 @@ class FeishuBot:
                             msg_type = response.get("type", "")
 
                             logger.info(f"[WebSocket 收到消息] ID={message_id}, type={msg_type}")
+
+                            # tool 消息不需要 chat_map 映射，直接处理
+                            if msg_type == "tool":
+                                await self._handle_tool_message(response)
+                                continue
 
                             # 检查消息 ID 是否存在映射
                             if message_id not in self._chat_map:

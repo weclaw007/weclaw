@@ -14,7 +14,7 @@
 async def summarize_and_rebuild_messages(
     messages: list,
     summary_llm,
-    max_token_limit: int = 30000,
+    max_token_limit: int = 10000,
     keep_recent_rounds: int = 6,
 ) -> tuple[list, list, SystemMessage | None] | None:
 ```
@@ -25,7 +25,7 @@ async def summarize_and_rebuild_messages(
 |------|------|--------|------|
 | `messages` | `list` | — | 从 Agent state 中获取的完整消息列表 |
 | `summary_llm` | LLM 实例 | — | 用于生成摘要的轻量模型 |
-| `max_token_limit` | `int` | `30000` | 触发压缩的 token 阈值 |
+| `max_token_limit` | `int` | `10000` | 触发压缩的 token 阈值 |
 | `keep_recent_rounds` | `int` | `6` | 保留最近几轮完整对话不压缩 |
 
 ### 返回值

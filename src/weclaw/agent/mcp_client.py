@@ -3,114 +3,134 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+from mcp.client.streamable_http import streamable_http_client, create_mcp_http_client
 
 
-def parse_arguments(args_list: list[str] | None) -> dict[str, Any]:
-    """解析命令参数，支持 JSON 格式和 key=value 格式。
+def expand_env_vars(value: str) -> str:
+    """展开字符串中的环境变量引用。
+
+    支持 $VAR_NAME 格式（VAR 为字母开头，包含字母数字下划线）。
+    如果环境变量不存在，保持原样不替换。
+    """
+    def replace_var(match: re.Match) -> str:
+        var_name = match.group(1)
+        return os.getenv(var_name, match.group(0))
+
+    pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
+    return re.sub(pattern, replace_var, value)
+
+
+def parse_arguments(args_str: str | None) -> dict[str, Any]:
+    """解析命令参数，仅支持 JSON 格式。
 
     支持的格式：
-    1. JSON 格式（单个字符串）：'{"city": "北京"}'
-    2. key=value 格式（多个参数）：city=北京 count=5
-    3. 混合格式时优先尝试 JSON 解析
+    - JSON 字符串：'{"city": "北京", "count": 5}'
 
-    key=value 格式中，值会自动进行类型推断：
-    - 纯数字 -> int/float
-    - true/false -> bool
-    - 其他 -> str
+    会自动去除外层可能被 shell 保留的单引号。
     """
-    if not args_list:
+    if not args_str:
         return {}
 
-    # 如果只有一个参数，先尝试作为 JSON 解析
-    if len(args_list) == 1:
-        raw = args_list[0]
-        # 去除可能被 Windows shell 保留的外层单引号
-        if raw.startswith("'") and raw.endswith("'"):
-            raw = raw[1:-1]
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
-        except (json.JSONDecodeError, ValueError):
-            pass
-        # JSON 解析失败，当作单个 key=value 处理
-        if "=" in raw:
-            args_list = [raw]
-        else:
-            raise ValueError(
-                f"Invalid argument format: '{raw}'. "
-                "Use JSON format '{\"key\": \"value\"}' or key=value format 'key=value'."
-            )
+    raw = args_str.strip()
+    # 去除可能被 Windows shell 保留的外层单引号
+    if raw.startswith("'") and raw.endswith("'"):
+        raw = raw[1:-1]
 
-    # key=value 格式解析
-    result = {}
-    for item in args_list:
-        if "=" not in item:
-            raise ValueError(
-                f"Invalid argument: '{item}'. Expected key=value format (e.g. city=北京)."
-            )
-        key, _, value = item.partition("=")
-        key = key.strip()
-        value = value.strip()
-
-        # 类型推断
-        if value.lower() == "true":
-            result[key] = True
-        elif value.lower() == "false":
-            result[key] = False
-        else:
-            try:
-                result[key] = int(value)
-            except ValueError:
-                try:
-                    result[key] = float(value)
-                except ValueError:
-                    result[key] = value
-
-    return result
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+        raise ValueError(
+            f"JSON 参数必须是对象格式，但收到了 {type(parsed).__name__}。"
+        )
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"无法解析 JSON 参数: {e}。"
+            f"请使用 JSON 格式，如: '{{\"key\": \"value\"}}'"
+        ) from e
 
 
 class MCPClient:
     """MCP 客户端，使用官方 SDK 通过 SSE 连接远程 MCP 服务器。"""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, extra_headers: dict[str, str] | None = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.extra_headers = extra_headers or {}
         self.session: ClientSession | None = None
         self._client_context = None
+        self._http_client = None
+
+    def _is_sse_url(self) -> bool:
+        """判断 URL 是否使用 SSE 传输方式（URL 路径中包含 'sse'）。"""
+        from urllib.parse import urlparse
+        path = urlparse(self.base_url).path.lower()
+        # 路径中包含 /sse 或以 /sse 结尾
+        return "/sse" in path
 
     async def __aenter__(self):
         """异步上下文管理器入口。"""
-        # 直接使用官方 SSE 客户端，传入认证 headers
+        # 构建认证 headers
         headers = {
             "Authorization": f"Bearer {self.api_key}",
         }
+        # 合并自定义 headers（可覆盖默认 Authorization）
+        headers.update(self.extra_headers)
         
-        # 使用官方 SSE 客户端连接
-        self._client_context = sse_client(self.base_url, headers=headers)
-        read_stream, write_stream = await self._client_context.__aenter__()
-        
-        # 创建会话
-        self.session = ClientSession(read_stream, write_stream)
-        await self.session.__aenter__()
-        
-        # 初始化连接
-        await self.session.initialize()
-        logging.info(f"MCP 会话已初始化: {self.base_url}")
+        transport = "SSE" if self._is_sse_url() else "Streamable HTTP"
+        try:
+            # 根据 URL 选择传输方式：包含 sse 使用 SSE，否则使用 Streamable HTTP
+            if self._is_sse_url():
+                logging.info(f"使用 SSE 传输方式连接: {self.base_url}")
+                self._client_context = sse_client(self.base_url, headers=headers)
+            else:
+                logging.info(f"使用 Streamable HTTP 传输方式连接: {self.base_url}")
+                self._http_client = create_mcp_http_client(headers=headers)
+                self._client_context = streamable_http_client(self.base_url, http_client=self._http_client)
+            
+            streams = await self._client_context.__aenter__()
+            # SSE 返回 (read, write)，Streamable HTTP 返回 (read, write, get_session_id)
+            read_stream, write_stream = streams[0], streams[1]
+            
+            # 创建会话
+            self.session = ClientSession(read_stream, write_stream)
+            await self.session.__aenter__()
+            
+            # 初始化连接
+            await self.session.initialize()
+            logging.info(f"MCP 会话已初始化: {self.base_url}")
+        except Exception as e:
+            # 连接失败时给出明确的错误提示，不打印完整异常栈
+            error_type = type(e).__name__
+            raise ConnectionError(
+                f"MCP 服务连接失败 [{transport}]: {self.base_url} — {error_type}: {e}"
+            ) from None
         
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """异步上下文管理器退出。"""
-        if self.session:
-            await self.session.__aexit__(exc_type, exc_val, exc_tb)
-        if self._client_context:
-            await self._client_context.__aexit__(exc_type, exc_val, exc_tb)
+        try:
+            if self.session:
+                await self.session.__aexit__(exc_type, exc_val, exc_tb)
+        except Exception as e:
+            logging.debug(f"关闭 session 时出错: {e}")
+        try:
+            if self._client_context:
+                await self._client_context.__aexit__(exc_type, exc_val, exc_tb)
+        except Exception as e:
+            logging.debug(f"关闭 client context 时出错: {e}")
+        try:
+            if self._http_client:
+                await self._http_client.aclose()
+        except Exception as e:
+            logging.debug(f"关闭 http client 时出错: {e}")
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """列出所有可用工具。"""
@@ -132,7 +152,20 @@ class MCPClient:
         if not self.session:
             raise RuntimeError("客户端未初始化，请使用 async with MCPClient(...) as client")
         
-        result = await self.session.call_tool(name, arguments=arguments or {})
+        try:
+            result = await self.session.call_tool(name, arguments=arguments or {})
+        except Exception as e:
+            error_type = type(e).__name__
+            raise RuntimeError(
+                f"MCP 工具调用失败: tool={name}, error={error_type}: {e}"
+            ) from None
+        
+        # 检查服务端是否返回了 isError 标志
+        if getattr(result, 'isError', False):
+            error_texts = [c.text for c in result.content if hasattr(c, 'text')]
+            raise RuntimeError(
+                f"MCP 工具 '{name}' 返回错误: {' | '.join(error_texts) if error_texts else '未知错误'}"
+            )
         
         # 返回结构化输出（如果有）或文本内容
         if hasattr(result, 'structuredContent') and result.structuredContent:
@@ -186,6 +219,7 @@ async def main():
     parser = argparse.ArgumentParser(description="MCP 客户端命令行工具")
     parser.add_argument("--base-url", "-u", required=True, help="MCP 服务器 URL")
     parser.add_argument("--api-key", "-k", required=True, help="API key 的环境变量名（如 DASHSCOPE_API_KEY），程序会自动从环境变量中读取实际值")
+    parser.add_argument("--header", "-H", action="append", default=[], help="自定义 HTTP 头，格式为 key=value（可多次指定），如 -H a=b -H c=d")
     
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
     
@@ -195,7 +229,7 @@ async def main():
     # call_command 命令
     call_parser = subparsers.add_parser("call_command", help="调用指定命令")
     call_parser.add_argument("command_name", help="命令名称")
-    call_parser.add_argument("--args", "-a", nargs="*", help="命令参数，支持 JSON 格式或 key=value 格式（如 city=北京 count=5）", default=[])
+    call_parser.add_argument("--args", "-a", type=str, help="命令参数，JSON 格式字符串（如 '{\"city\": \"北京\", \"count\": 5}'）", default=None)
 
     # list-resources 命令
     subparsers.add_parser("list-resources", help="列出所有可用资源")
@@ -215,9 +249,19 @@ async def main():
     if api_key == args.api_key:
         logging.warning(f"环境变量 {args.api_key} 未设置，将直接使用传入的值作为 API key")
 
+    # 解析自定义 headers
+    extra_headers = {}
+    for h in args.header:
+        if "=" not in h:
+            print(f"Error: invalid header format: '{h}'. Expected key=value format (e.g. X-Custom=value).", file=sys.stderr)
+            sys.exit(1)
+        key, _, value = h.partition("=")
+        extra_headers[key.strip()] = expand_env_vars(value.strip())
+
     async with MCPClient(
         base_url=args.base_url,
         api_key=api_key,
+        extra_headers=extra_headers,
     ) as client:
         try:
             if args.command == "list-tools":
@@ -227,7 +271,7 @@ async def main():
             elif args.command == "call_command":
                 try:
                     tool_args = parse_arguments(args.args)
-                except (json.JSONDecodeError, ValueError) as e:
+                except ValueError as e:
                     print(f"Error: invalid command arguments: {e}", file=sys.stderr)
                     sys.exit(1)
                 
@@ -242,9 +286,13 @@ async def main():
                 content = await client.read_resource(args.uri)
                 print(json.dumps(content, ensure_ascii=False, indent=2))
                 
+        except ConnectionError as e:
+            # 连接类错误：信息已在 __aenter__ 中格式化，直接输出
+            print(f"连接错误: {e}", file=sys.stderr)
+            sys.exit(1)
         except Exception as e:
-            print(f"错误: {e}", file=sys.stderr)
-            logging.exception("执行失败")
+            error_type = type(e).__name__
+            print(f"执行失败 [{error_type}]: {e}", file=sys.stderr)
             sys.exit(1)
 
 

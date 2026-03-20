@@ -1,7 +1,10 @@
 """系统消息处理器基类"""
 import json
 import logging
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from weclaw.utils.agent_config import AgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +17,17 @@ class ClientContext(Protocol):
     从而实现解耦。单元测试时可传入 Mock 对象。
     """
 
+    session_id: str
+    """当前会话 ID，每个 agent 独立配置"""
+
     model_name: str | None
     """当前使用的模型配置名"""
 
     inject_prompt: str
     """注入的系统提示词"""
+
+    config: "AgentConfig"
+    """Agent 配置管理器，每个 session 独立"""
 
     async def reset_agent(self) -> None:
         """重置 Agent：销毁旧实例，下次对话时会用新配置重新初始化"""

@@ -198,7 +198,7 @@ def serialize_messages_to_text(messages: list) -> str:
 async def summarize_and_rebuild_messages(
     messages: list,
     summary_llm,
-    max_token_limit: int = 30000,
+    max_token_limit: int = 10000,
     keep_recent_rounds: int = 6,
 ) -> tuple[list, list, "SystemMessage | None"] | None:
     """检查消息列表 token 数，超过阈值时生成摘要并返回重建所需的操作。
@@ -233,6 +233,7 @@ async def summarize_and_rebuild_messages(
     # 粗估：中文约 1.5 字符/token，英文约 4 字符/token，取保守值 2 字符/token
     estimated_tokens = total_chars // 2
 
+    # 这个总长度只是所有Message 内容长度，不包括 组装成json 格式需要的额外数据，还不包括系统提示词
     if estimated_tokens <= max_token_limit:
         return None
 

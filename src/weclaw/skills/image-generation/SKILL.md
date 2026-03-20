@@ -52,13 +52,13 @@ PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
 
 > **重要：`-u` 和 `-k` 是固定参数，每次调用都必须原样传递，不可省略、不可修改。直接复制以下示例中的 `-u` 和 `-k` 值即可。**
 >
-> **参数格式：`-a` 支持 key=value 格式（推荐，跨平台兼容）和 JSON 格式，多个参数用空格分隔。如果值包含空格，需用双引号包裹，如 `-a prompt="A cinematic sunset"`。**
+> **参数格式：`-a` 使用 JSON 格式传入参数，如 `-a '{"prompt": "A cinematic sunset"}'`。**
 
 ```bash
 $PYTHON_CMD -m weclaw.agent.mcp_client \
   -u https://dashscope.aliyuncs.com/api/v1/mcps/QwenImage/sse \
   -k DASHSCOPE_API_KEY \
-  call_command modelstudio_qwen_image_gen -a prompt="A cinematic sunset over a cyberpunk city" size=1024*1024
+  call_command modelstudio_qwen_image_gen -a '{"prompt": "A cinematic sunset over a cyberpunk city", "size": "1024*1024"}'
 ```
 
 图片编辑示例：
@@ -67,7 +67,7 @@ $PYTHON_CMD -m weclaw.agent.mcp_client \
 $PYTHON_CMD -m weclaw.agent.mcp_client \
   -u https://dashscope.aliyuncs.com/api/v1/mcps/QwenImage/sse \
   -k DASHSCOPE_API_KEY \
-  call_command modelstudio_qwen_image_edit -a image_url=https://example.com/photo.jpg prompt="将背景改为星空"
+  call_command modelstudio_qwen_image_edit -a '{"image_url": "https://example.com/photo.jpg", "prompt": "将背景改为星空"}'
 ```
 
 ## Notes

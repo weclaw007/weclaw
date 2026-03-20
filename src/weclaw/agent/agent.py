@@ -92,9 +92,54 @@ async def read_local_file(file_path: str) -> str:
 
 
 @tool
+async def write_local_file(file_path: str, content: str, mode: str = "overwrite", encoding: str = "text") -> str:
+    """写入内容到本地文件，支持文本和二进制数据。
+
+    Args:
+        file_path: 目标文件路径，支持 ~ 展开
+        content: 要写入的内容。当 encoding='text' 时为普通文本字符串；当 encoding='base64' 时为 base64 编码的二进制数据
+        mode: 写入模式，'overwrite' 覆盖写入（默认），'append' 追加写入
+        encoding: 内容编码方式，'text' 文本模式（默认），'base64' 二进制模式（content 需为 base64 编码字符串）
+    """
+    try:
+        path = Path(file_path).expanduser().resolve()
+
+        # 自动创建父目录
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if encoding == "base64":
+            # 二进制模式：将 base64 字符串解码为字节后写入
+            try:
+                data = base64.b64decode(content)
+            except Exception:
+                return "base64 解码失败，请检查 content 是否为合法的 base64 编码字符串"
+
+            file_mode = "ab" if mode == "append" else "wb"
+
+            def _write_binary():
+                with open(path, file_mode) as f:
+                    f.write(data)
+            await asyncio.to_thread(_write_binary)
+        else:
+            # 文本模式
+            if mode == "append":
+                def _append():
+                    with open(path, "a", encoding="utf-8") as f:
+                        f.write(content)
+                await asyncio.to_thread(_append)
+            else:
+                await asyncio.to_thread(path.write_text, content, encoding="utf-8")
+
+        return f"文件写入成功: {path}"
+    except Exception as e:
+        return f"文件写入失败: {e}"
+
+
+@tool
 async def run_command(command: str, timeout: int = 60) -> str:
     """执行命令行工具（Windows: powershell，其他: bash）。"""
     try:
+        logger.info(f'run_command: {command}')
         result = await _run_command_async(command, timeout=timeout, capture=True)
 
         stdout = result.get("stdout", "").strip()
@@ -121,7 +166,7 @@ class Agent:
         self._db_conn: aiosqlite.Connection | None = None
         self._session_id: str = "main"
         self._summary_llm: Any | None = None
-        self._max_token_limit: int = 30000
+        self._max_token_limit: int = 10000
 
     async def __aenter__(self):
         return self
@@ -141,7 +186,7 @@ class Agent:
         request_timeout: int = 120,
         session_id: str | None = None,
         summary_model_name: str | None = None,
-        max_token_limit: int = 3000,
+        max_token_limit: int = 10000,
         **kwargs: Any,
     ) -> None:
         """初始化底层模型与 agent。
@@ -153,7 +198,7 @@ class Agent:
             request_timeout: 请求超时时间（秒）
             session_id: 会话 ID，用于持久化检查点
             summary_model_name: 用于生成摘要的模型名（建议使用便宜小模型），为 None 时使用与主模型相同的模型
-            max_token_limit: 触发上下文摘要压缩的 token 阈值，默认 30000
+            max_token_limit: 触发上下文摘要压缩的 token 阈值，默认 10000
         """
         # 如果已有旧连接，先关闭防止泄漏
         if self._db_conn is not None:
@@ -190,7 +235,7 @@ class Agent:
         _read_tool_result = self._create_read_tool_result_tool(resolved_session_id)
 
         # 默认注入系统工具，支持调用方追加自定义工具。
-        tools = [run_command, read_local_file, read_skill, _read_tool_result, *(custom_tools or [])]
+        tools = [run_command, read_local_file, write_local_file, read_skill, _read_tool_result, *(custom_tools or [])]
         self.agent = create_agent(
             model=llm,
             checkpointer=checkpoint,

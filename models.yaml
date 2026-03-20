@@ -88,6 +88,8 @@ models:
 
 # 默认使用的模型（对应上面的 key）
 default: qwen-plus
+# 摘要/上下文优化使用的轻量模型（对应上面的 key）
+summary_model: qwen-turbo
 
 # Ollama 配置（自动发现本地模型时使用）
 ollama:

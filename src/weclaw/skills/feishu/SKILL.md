@@ -15,7 +15,36 @@ metadata:
 
 # feishu
 
-Use this skill to start and manage Feishu (Lark) bot, send messages through Feishu bot, and interact with Feishu Open API. This skill provides Feishu bot functionality including message receiving, replying, and bot operations via lark-oapi SDK.
+Use this skill to start and manage Feishu (Lark) bot, send messages through Feishu bot, and interact with Feishu Open API. This skill provides Feishu bot functionality including message receiving, replying, and bot operations via lark-oapi SDK.Use the `message` tool. No provider-specific `feishu` tool exposed to the agent.
+
+
+## Params Descriptions
+`message` tool params:
+
+
+# 发送图片消息
+```json
+{
+    "action": "send_pic",
+    "path": "xxxx.png"
+}
+```
+
+# 发送文件
+```json
+{
+    "action": "send_file",
+    "path": "xxxx.png"
+}
+```
+
+# 发送文本消息
+```json
+{
+    "action": "send_text",
+    "text": "text content"
+}
+```
 
 
 ## Quick Start

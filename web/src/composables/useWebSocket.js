@@ -11,6 +11,7 @@ export function useWebSocket(url = 'ws://localhost:4567') {
   const modelsList = ref([])
   const defaultModel = ref('')
   const currentModel = ref('')
+  const persona = ref('')              // 当前 agent 人格设置
   const responseBuffers = ref({})      // { messageId: string }
   const responseFutures = ref({})      // { messageId: { resolve, reject } }
   const serverPushHandlers = ref([])   // 服务端主动推送的消息回调列表
@@ -26,9 +27,10 @@ export function useWebSocket(url = 'ws://localhost:4567') {
     ws.value.onopen = () => {
       connected.value = true
       console.log('[WebSocket] 已连接:', url)
-      // 连接成功后自动获取技能和模型列表
+      // 连接成功后自动获取技能、模型列表和人格配置
       sendSystemMessage('get_skills')
       sendSystemMessage('get_models')
+      sendSystemMessage('get_persona')
     }
 
     ws.value.onmessage = (event) => {
@@ -64,6 +66,12 @@ export function useWebSocket(url = 'ws://localhost:4567') {
 
     console.log('[WebSocket 收到消息]', { id: messageId, type: msgType })
 
+    if (msgType === 'tool') {
+      // 服务端通知消息，直接回复服务端
+      replyToolMessage(messageId, response)
+      return
+    }
+
     if (['start', 'chunk', 'end'].includes(msgType)) {
       handleStreamMessage(messageId, msgType, response)
     } else if (msgType === 'system') {
@@ -77,6 +85,26 @@ export function useWebSocket(url = 'ws://localhost:4567') {
         delete responseFutures.value[messageId]
       }
     }
+  }
+
+  /**
+   * 回复服务端的 tool 消息
+   * 服务端通过 send_and_wait 发送 tool 消息并等待前端回复
+   */
+  function replyToolMessage(messageId, response) {
+    if (!ws.value || ws.value.readyState !== WebSocket.OPEN) {
+      console.warn('[WebSocket] 未连接，无法回复 tool 消息')
+      return
+    }
+
+    const reply = {
+      id: messageId,
+      type: 'tool',
+      status: 'unsupported tool message',
+    }
+
+    ws.value.send(JSON.stringify(reply))
+    console.log('[WebSocket] 回复 tool 消息:', reply)
   }
 
   /**
@@ -139,6 +167,17 @@ export function useWebSocket(url = 'ws://localhost:4567') {
         skill.enabled = enabled
         console.log(`[WebSocket] 技能 ${skillName} 已${enabled ? '启用' : '禁用'}`)
       }
+    } else if (action === 'get_persona') {
+      persona.value = response.persona || ''
+      console.log(`[WebSocket] 获取到人格设置: ${persona.value.slice(0, 50) || '(未设置)'}`)
+    } else if (action === 'set_persona') {
+      if (response.success) {
+        console.log('[WebSocket] 人格设置已保存')
+        // 刷新人格配置
+        sendSystemMessage('get_persona')
+      } else {
+        console.error(`[WebSocket] 设置人格失败: ${response.error || '未知错误'}`)
+      }
     } else if (action === 'save_api_key') {
       // 后端确认 API Key 保存结果
       const skillName = response.skill_name
@@ -186,9 +225,11 @@ export function useWebSocket(url = 'ws://localhost:4567') {
       // 返回 messageId 以便外部监听 buffer 变化
       resolve.__messageId = messageId
       // 改用返回对象形式
-      resolve({ messageId, promise: new Promise((res, rej) => {
-        responseFutures.value[messageId] = { resolve: res, reject: rej }
-      })})
+      resolve({
+        messageId, promise: new Promise((res, rej) => {
+          responseFutures.value[messageId] = { resolve: res, reject: rej }
+        })
+      })
     })
   }
 
@@ -270,6 +311,7 @@ export function useWebSocket(url = 'ws://localhost:4567') {
     modelsList,
     defaultModel,
     currentModel,
+    persona,
     responseBuffers,
     connect,
     disconnect,

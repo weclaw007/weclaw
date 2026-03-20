@@ -1,5 +1,27 @@
 <template>
   <div class="chat-view">
+    <!-- 人格设置栏 -->
+    <div class="persona-bar">
+      <el-icon class="persona-icon" :size="18"><Avatar /></el-icon>
+      <el-input
+        v-model="personaInput"
+        placeholder="设置 AI 人格，如：你是一个友好的助手..."
+        size="small"
+        clearable
+        class="persona-input"
+      />
+      <el-button
+        type="primary"
+        size="small"
+        :icon="Check"
+        @click="handleSetPersona"
+        :disabled="!connected || personaInput === currentPersona"
+        class="persona-btn"
+      >
+        设置
+      </el-button>
+    </div>
+
     <!-- 聊天消息列表 -->
     <div class="chat-messages" ref="messagesContainer">
       <div v-if="messages.length === 0" class="empty-state">
@@ -78,7 +100,7 @@
 
 <script setup>
 import { ref, nextTick, watch, onMounted } from 'vue'
-import { Promotion } from '@element-plus/icons-vue'
+import { Promotion, Check } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 
 const props = defineProps({
@@ -86,9 +108,13 @@ const props = defineProps({
   responseBuffers: Object,
   modelsList: Array,
   currentModel: String,
+  persona: {
+    type: String,
+    default: '',
+  },
 })
 
-const emit = defineEmits(['send-message'])
+const emit = defineEmits(['send-message', 'set-persona'])
 
 const md = new MarkdownIt({
   html: false,
@@ -101,6 +127,29 @@ const messages = ref([])
 const isTyping = ref(false)
 const currentMessageId = ref(null)
 const messagesContainer = ref(null)
+const personaInput = ref('')
+const currentPersona = ref('')  // 记录当前已保存的人格，用于判断是否有修改
+
+/**
+ * 监听父组件传入的 persona prop 变化，同步到输入框
+ */
+watch(
+  () => props.persona,
+  (val) => {
+    personaInput.value = val || ''
+    currentPersona.value = val || ''
+  },
+  { immediate: true }
+)
+
+/**
+ * 点击设置人格按钮
+ */
+function handleSetPersona() {
+  const text = personaInput.value.trim()
+  emit('set-persona', text)
+  currentPersona.value = text
+}
 
 /**
  * 渲染 Markdown 内容
@@ -194,6 +243,33 @@ defineExpose({ onMessageComplete, onServerPushMessage })
   height: 100%;
   background: #ffffff;
   border-radius: 8px;
+}
+
+/* 人格设置栏 */
+.persona-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  background: #f0f5ff;
+  border-bottom: 1px solid #d9e4f5;
+}
+
+.persona-icon {
+  color: #409eff;
+  flex-shrink: 0;
+}
+
+.persona-input {
+  flex: 1;
+}
+
+.persona-input :deep(.el-input__inner) {
+  font-size: 13px;
+}
+
+.persona-btn {
+  flex-shrink: 0;
 }
 
 /* 消息列表 */
