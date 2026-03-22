@@ -154,11 +154,12 @@ class FeishuBot:
         ".ppt": "ppt", ".pptx": "ppt",
     }
 
-    def _upload_file(self, file_path: str) -> str | None:
+    def _upload_file(self, file_path: str, file_type_override: str | None = None) -> str | None:
         """上传文件到飞书，返回 file_key
 
         Args:
             file_path: 本地文件路径
+            file_type_override: 强制指定文件类型（如 "mp4"），为 None 时自动根据后缀推断
 
         Returns:
             file_key 字符串，上传失败返回 None
@@ -172,8 +173,11 @@ class FeishuBot:
                 return None
 
             file_name = os.path.basename(file_path)
-            suffix = os.path.splitext(file_name)[1].lower()
-            file_type = self._FILE_TYPE_MAP.get(suffix, "stream")
+            if file_type_override:
+                file_type = file_type_override
+            else:
+                suffix = os.path.splitext(file_name)[1].lower()
+                file_type = self._FILE_TYPE_MAP.get(suffix, "stream")
 
             with open(file_path, "rb") as f:
                 request = CreateFileRequest.builder() \
@@ -291,73 +295,188 @@ class FeishuBot:
             logger.exception(f"发送图片消息异常: {e}")
             return False
 
-    def _download_audio_resource(self, feishu_message_id: str, file_key: str) -> str | None:
-        """从飞书下载音频资源到本地临时文件
+    def _send_feishu_video(self, chat_id: str, video_path: str) -> bool:
+        """发送视频消息到飞书
+
+        上传视频文件获取 file_key（强制使用 mp4 类型以匹配 media 消息），
+        再上传视频第一帧作为封面获取 image_key，
+        最后通过飞书 media 消息类型发送视频。
+
+        Args:
+            chat_id: 飞书会话 ID
+            video_path: 本地视频文件路径
+
+        Returns:
+            是否发送成功
+        """
+        # 视频上传必须使用 file_type="mp4" 才能匹配 media 消息类型
+        file_key = self._upload_file(video_path, file_type_override="mp4")
+        if not file_key:
+            logger.error(f"视频发送失败: 无法上传视频文件 {video_path}")
+            return False
+
+        # 尝试提取视频封面并上传，封面非必须
+        image_key = ""
+        try:
+            import subprocess
+            tmp_cover = os.path.join(tempfile.gettempdir(), "feishu_video_cover",
+                                     f"{os.path.basename(video_path)}.jpg")
+            os.makedirs(os.path.dirname(tmp_cover), exist_ok=True)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", video_path, "-vframes", "1",
+                 "-q:v", "2", tmp_cover],
+                capture_output=True, timeout=10
+            )
+            if os.path.isfile(tmp_cover):
+                image_key = self._upload_image(tmp_cover) or ""
+        except Exception as e:
+            logger.warning(f"提取视频封面失败（不影响发送）: {e}")
+
+        try:
+            file_name = os.path.basename(os.path.expanduser(video_path))
+            content_data = {"file_key": file_key, "file_name": file_name}
+            if image_key:
+                content_data["image_key"] = image_key
+            content = json.dumps(content_data)
+
+            request = CreateMessageRequest.builder() \
+                .receive_id_type("chat_id") \
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(chat_id)
+                    .msg_type("media")
+                    .content(content)
+                    .build()
+                ).build()
+
+            response = self.lark_client.im.v1.message.create(request)
+
+            if not response.success():
+                logger.error(
+                    f"发送视频消息失败: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return False
+
+            logger.info(f"已发送视频消息到会话 {chat_id}: {video_path}")
+            return True
+
+        except Exception as e:
+            logger.exception(f"发送视频消息异常: {e}")
+            return False
+
+    # ── 媒体类型配置 ──────────────────────────────────────────────────────────
+    # 每种媒体类型对应的下载配置和消息配置
+    # resource_type: 飞书 API 下载资源类型
+    # content_key: 飞书消息 content 中的资源 key 字段名
+    # file_ext: 本地临时文件后缀
+    # tmp_subdir: 临时文件子目录名
+    # display_name: 中文显示名称（用于日志和用户提示）
+    # ws_timeout: WebSocket 发送超时时间（秒）
+    _MEDIA_TYPE_CONFIG = {
+        "image": {
+            "resource_type": "image",
+            "content_key": "image_key",
+            "file_ext": ".jpg",
+            "tmp_subdir": "feishu_image",
+            "display_name": "图片",
+            "ws_timeout": 30,
+        },
+        "audio": {
+            "resource_type": "file",
+            "content_key": "file_key",
+            "file_ext": ".opus",
+            "tmp_subdir": "feishu_audio",
+            "display_name": "语音",
+            "ws_timeout": 30,
+        },
+        "video": {
+            "resource_type": "file",
+            "content_key": "file_key",
+            "file_ext": ".mp4",
+            "tmp_subdir": "feishu_video",
+            "display_name": "视频",
+            "ws_timeout": 60,
+        },
+    }
+
+    def _download_resource(self, feishu_message_id: str, file_key: str, media_type: str) -> str | None:
+        """从飞书下载媒体资源到本地临时文件
 
         Args:
             feishu_message_id: 飞书消息 ID
-            file_key: 音频文件的 file_key
+            file_key: 资源的 file_key / image_key
+            media_type: 媒体类型（image / audio / video）
 
         Returns:
             本地临时文件路径，下载失败返回 None
         """
+        config = self._MEDIA_TYPE_CONFIG[media_type]
+        display_name = config["display_name"]
+
         try:
             request = GetMessageResourceRequest.builder() \
                 .message_id(feishu_message_id) \
                 .file_key(file_key) \
-                .type("file") \
+                .type(config["resource_type"]) \
                 .build()
 
             response = self.lark_client.im.v1.message_resource.get(request)
 
             if not response.success():
                 logger.error(
-                    f"下载音频资源失败: code={response.code}, msg={response.msg}, "
+                    f"下载{display_name}资源失败: code={response.code}, msg={response.msg}, "
                     f"log_id={response.get_log_id()}"
                 )
                 return None
 
-            # 将音频数据写入临时文件
-            # 飞书音频消息格式为 opus，保存为 .opus 后缀
-            tmp_dir = os.path.join(tempfile.gettempdir(), "feishu_audio")
+            # 将数据写入临时文件
+            tmp_dir = os.path.join(tempfile.gettempdir(), config["tmp_subdir"])
             os.makedirs(tmp_dir, exist_ok=True)
-            tmp_path = os.path.join(tmp_dir, f"{file_key}.opus")
+            tmp_path = os.path.join(tmp_dir, f"{file_key}{config['file_ext']}")
 
             with open(tmp_path, "wb") as f:
                 f.write(response.file.read())
 
-            logger.info(f"音频资源已下载: {feishu_message_id}/{file_key} -> {tmp_path}")
+            logger.info(f"{display_name}资源已下载: {feishu_message_id}/{file_key} -> {tmp_path}")
             return tmp_path
 
         except Exception as e:
-            logger.exception(f"下载音频资源异常: {e}")
+            logger.exception(f"下载{display_name}资源异常: {e}")
             return None
 
-    def _handle_audio_message(self, chat_id: str, feishu_message_id: str, content: dict) -> None:
-        """处理音频消息
+    def _handle_media_message(self, chat_id: str, feishu_message_id: str,
+                              content: dict, media_type: str) -> None:
+        """处理媒体消息（图片 / 音频 / 视频）的统一入口
 
-        从飞书下载音频文件，通过 WebSocket 以文件路径方式发送给大模型进行语音识别。
+        从飞书下载媒体文件，通过 WebSocket 以文件路径方式发送给大模型处理。
 
         Args:
             chat_id: 飞书会话 ID
             feishu_message_id: 飞书消息 ID（用于下载资源）
-            content: 飞书音频消息内容，格式如 {"file_key": "..."}
+            content: 飞书消息内容
+            media_type: 媒体类型（image / audio / video）
         """
+        config = self._MEDIA_TYPE_CONFIG[media_type]
+        display_name = config["display_name"]
+        content_key = config["content_key"]
+
         # 停止状态下不处理消息
         if self._stopped:
             self._send_feishu_reply(chat_id, "机器人已停止，发送 /start 重新启动。")
             return
 
-        file_key = content.get("file_key", "")
-        if not file_key:
-            logger.error(f"音频消息缺少 file_key: {content}")
-            self._send_feishu_reply(chat_id, "无法解析语音消息。")
+        # 提取资源 key
+        resource_key = content.get(content_key, "")
+        if not resource_key:
+            logger.error(f"{display_name}消息缺少 {content_key}: {content}")
+            self._send_feishu_reply(chat_id, f"无法解析{display_name}消息。")
             return
 
-        # 下载音频文件
-        audio_path = self._download_audio_resource(feishu_message_id, file_key)
-        if not audio_path:
-            self._send_feishu_reply(chat_id, "语音消息下载失败，请稍后再试。")
+        # 下载媒体文件
+        file_path = self._download_resource(feishu_message_id, resource_key, media_type)
+        if not file_path:
+            self._send_feishu_reply(chat_id, f"{display_name}下载失败，请稍后再试。")
             return
 
         # 检查 WebSocket 连接
@@ -373,12 +492,9 @@ class FeishuBot:
             self._message_map[message_id] = feishu_message_id
             self._chat_map[message_id] = chat_id
 
-            # 构建消息，audio 字段使用列表格式
-            request = build_user_message(
-                message_id,
-                "",
-                audio=[{"type": "file", "data": audio_path}]
-            )
+            # 构建消息，以媒体类型作为字段名
+            media_payload = {media_type: [{"type": "file", "data": file_path}]}
+            request = build_user_message(message_id, "", **media_payload)
 
             # 发送到 WebSocket
             if self._loop and self.websocket:
@@ -386,92 +502,14 @@ class FeishuBot:
                     self.websocket.send(json.dumps(request, ensure_ascii=False)),
                     self._loop
                 )
-                future.result(timeout=30)  # 语音文件较大，超时时间适当延长
-                logger.info(f"已发送语音消息到 WebSocket [{message_id}]: {audio_path}")
+                future.result(timeout=config["ws_timeout"])
+                logger.info(f"已发送{display_name}消息到 WebSocket [{message_id}]: {file_path}")
             else:
                 logger.error("WebSocket 连接不可用")
                 self._send_feishu_reply(chat_id, "抱歉，服务暂时不可用，请稍后再试。")
 
         except Exception as e:
-            logger.exception(f"发送语音消息到 WebSocket 失败: {e}")
-
-    async def _reply_tool_message(self, message_id: str, status: str, **kwargs) -> None:
-        """通过 WebSocket 回复工具消息结果给大模型
-
-        Args:
-            message_id: 原始工具消息的 ID
-            status: 执行状态，如 "success" 或 "error"
-            **kwargs: 其他业务字段，如 error_msg 等
-        """
-        reply = build_tool_message(message_id, status=status, **kwargs)
-        if self.websocket:
-            try:
-                await self.websocket.send(json.dumps(reply, ensure_ascii=False))
-                logger.info(f"已回复工具消息: id={message_id}, status={status}")
-            except Exception as e:
-                logger.error(f"回复工具消息失败: {e}")
-        else:
-            logger.error("WebSocket 连接不可用，无法回复工具消息")
-
-    async def _handle_tool_message(self, response: dict) -> None:
-        """处理大模型发送过来的工具消息
-
-        工具消息用来和 LARK_GREETING_CHAT_ID 标识的用户交互。
-        根据 action 字段分发到不同的处理方法，执行结果通过 WebSocket 回复给大模型。
-
-        Args:
-            response: WebSocket 收到的工具消息，格式如:
-                {"id": "...", "type": "tool", "action": "send_pic", "path": "xxx.png"}
-        """
-        chat_id = self._greeting_chat_id
-        if not chat_id:
-            logger.warning("未配置 LARK_GREETING_CHAT_ID，无法处理工具消息")
-            return
-
-        action = response.get("action", "")
-        message_id = response.get("id", "")
-
-        logger.info(f"处理工具消息: id={message_id}, action={action}")
-
-        if action == "send_pic":
-            # 发送图片
-            path = response.get("path", "")
-            if not path:
-                logger.error(f"send_pic 缺少 path 参数: {response}")
-                await self._reply_tool_message(message_id, "error", error_msg="缺少图片路径")
-                return
-            ok = self._send_feishu_image(chat_id, path)
-            if ok:
-                await self._reply_tool_message(message_id, "success", action=action, path=path)
-            else:
-                await self._reply_tool_message(message_id, "error", error_msg=f"图片发送失败: {path}")
-
-        elif action == "send_text":
-            # 发送文本消息
-            text = response.get("text", "")
-            if not text:
-                logger.error(f"send_text 缺少 text 参数: {response}")
-                await self._reply_tool_message(message_id, "error", error_msg="缺少文本内容")
-                return
-            self._send_feishu_reply(chat_id, text)
-            await self._reply_tool_message(message_id, "success", action=action)
-
-        elif action == "send_file":
-            # 发送文件
-            path = response.get("path", "")
-            if not path:
-                logger.error(f"send_file 缺少 path 参数: {response}")
-                await self._reply_tool_message(message_id, "error", error_msg="缺少文件路径")
-                return
-            ok = self._send_feishu_file(chat_id, path)
-            if ok:
-                await self._reply_tool_message(message_id, "success", action=action, path=path)
-            else:
-                await self._reply_tool_message(message_id, "error", error_msg=f"文件发送失败: {path}")
-
-        else:
-            logger.warning(f"未知的工具消息 action: {action}, 完整消息: {response}")
-            await self._reply_tool_message(message_id, "error", error_msg=f"不支持的操作: {action}")
+            logger.exception(f"发送{display_name}消息到 WebSocket 失败: {e}")
 
     def _handle_receive_message(self, data: lark.im.v1.P2ImMessageReceiveV1) -> None:
         """处理接收到的飞书消息事件
@@ -501,14 +539,19 @@ class FeishuBot:
                 self._handle_location_message(chat_id, content)
                 return
 
-            # 处理音频消息
-            if msg_type == "audio":
-                self._handle_audio_message(chat_id, message.message_id, content)
+            # 飞书消息类型 -> 内部媒体类型的映射
+            _FEISHU_MEDIA_MAP = {"image": "image", "audio": "audio", "media": "video"}
+
+            # 处理媒体消息（图片 / 音频 / 视频）
+            if msg_type in _FEISHU_MEDIA_MAP:
+                self._handle_media_message(
+                    chat_id, message.message_id, content, _FEISHU_MEDIA_MAP[msg_type]
+                )
                 return
 
-            # 除位置消息和音频消息外，目前只处理文本消息
+            # 除位置消息和媒体消息外，目前只处理文本消息
             if msg_type != "text":
-                self._send_feishu_reply(chat_id, "暂时只支持文本消息、语音消息和位置消息哦~")
+                self._send_feishu_reply(chat_id, "暂时只支持文本消息、图片消息、语音消息、视频消息和位置消息哦~")
                 return
 
             text = content.get("text", "").strip()
@@ -633,6 +676,97 @@ class FeishuBot:
 
         except Exception as e:
             logger.exception(f"发送位置消息到 WebSocket 失败: {e}")
+
+    async def _reply_tool_message(self, message_id: str, status: str, **kwargs) -> None:
+        """通过 WebSocket 回复工具消息结果给大模型
+
+        Args:
+            message_id: 原始工具消息的 ID
+            status: 执行状态，如 "success" 或 "error"
+            **kwargs: 其他业务字段，如 error_msg 等
+        """
+        reply = build_tool_message(message_id, status=status, **kwargs)
+        if self.websocket:
+            try:
+                await self.websocket.send(json.dumps(reply, ensure_ascii=False))
+                logger.info(f"已回复工具消息: id={message_id}, status={status}")
+            except Exception as e:
+                logger.error(f"回复工具消息失败: {e}")
+        else:
+            logger.error("WebSocket 连接不可用，无法回复工具消息")
+
+    async def _handle_tool_message(self, response: dict) -> None:
+        """处理大模型发送过来的工具消息
+
+        工具消息用来和 LARK_GREETING_CHAT_ID 标识的用户交互。
+        根据 action 字段分发到不同的处理方法，执行结果通过 WebSocket 回复给大模型。
+
+        Args:
+            response: WebSocket 收到的工具消息，格式如:
+                {"id": "...", "type": "tool", "action": "send_pic", "path": "xxx.png"}
+        """
+        chat_id = self._greeting_chat_id
+        if not chat_id:
+            logger.warning("未配置 LARK_GREETING_CHAT_ID，无法处理工具消息")
+            return
+
+        action = response.get("action", "")
+        message_id = response.get("id", "")
+
+        logger.info(f"处理工具消息: id={message_id}, action={action}")
+
+        if action == "send_pic":
+            # 发送图片
+            path = response.get("path", "")
+            if not path:
+                logger.error(f"send_pic 缺少 path 参数: {response}")
+                await self._reply_tool_message(message_id, "error", error_msg="缺少图片路径")
+                return
+            ok = self._send_feishu_image(chat_id, path)
+            if ok:
+                await self._reply_tool_message(message_id, "success", action=action, path=path)
+            else:
+                await self._reply_tool_message(message_id, "error", error_msg=f"图片发送失败: {path}")
+
+        elif action == "send_text":
+            # 发送文本消息
+            text = response.get("text", "")
+            if not text:
+                logger.error(f"send_text 缺少 text 参数: {response}")
+                await self._reply_tool_message(message_id, "error", error_msg="缺少文本内容")
+                return
+            self._send_feishu_reply(chat_id, text)
+            await self._reply_tool_message(message_id, "success", action=action)
+
+        elif action == "send_file":
+            # 发送文件
+            path = response.get("path", "")
+            if not path:
+                logger.error(f"send_file 缺少 path 参数: {response}")
+                await self._reply_tool_message(message_id, "error", error_msg="缺少文件路径")
+                return
+            ok = self._send_feishu_file(chat_id, path)
+            if ok:
+                await self._reply_tool_message(message_id, "success", action=action, path=path)
+            else:
+                await self._reply_tool_message(message_id, "error", error_msg=f"文件发送失败: {path}")
+
+        elif action == "send_video":
+            # 发送视频
+            path = response.get("path", "")
+            if not path:
+                logger.error(f"send_video 缺少 path 参数: {response}")
+                await self._reply_tool_message(message_id, "error", error_msg="缺少视频路径")
+                return
+            ok = self._send_feishu_video(chat_id, path)
+            if ok:
+                await self._reply_tool_message(message_id, "success", action=action, path=path)
+            else:
+                await self._reply_tool_message(message_id, "error", error_msg=f"视频发送失败: {path}")
+
+        else:
+            logger.warning(f"未知的工具消息 action: {action}, 完整消息: {response}")
+            await self._reply_tool_message(message_id, "error", error_msg=f"不支持的操作: {action}")
 
     async def _websocket_receiver(self) -> None:
         """WebSocket 消息接收循环，支持断线自动重连"""

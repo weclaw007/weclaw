@@ -34,14 +34,14 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
 
-  # 全模态
+  # 视觉
   qwen-vl:
     provider: openai
-    model: qwen-vl-plus-latest
+    model: qwen-vl-plus-2025-05-07
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
 
-
+  # 语音
   qwen3-audio:
     provider: openai
     model: qwen3-asr-flash
@@ -100,8 +100,12 @@ default: qwen3
 # 摘要/上下文优化使用的轻量模型（对应上面的 key）
 summary_model: qwen-turbo
 
-# 多模态预处理模型（用于将音频/图片/视频转为纯文本，对应上面的 key）
-multimodal_model: qwen-vl
+# 多模态预处理模型（按媒体类型分别配置，对应上面的 key）
+# 同一类型的多媒体使用同一个模型处理，不同类型使用各自最适合的模型
+multimodal_model:
+  audio: qwen3-audio     # 音频识别模型
+  image: qwen-vl         # 图片识别模型
+  video: qwen-vl         # 视频识别模型
 
 # Ollama 配置（自动发现本地模型时使用）
 ollama:

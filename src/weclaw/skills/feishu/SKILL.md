@@ -21,8 +21,9 @@ Use this skill to start and manage Feishu (Lark) bot, send messages through Feis
 ## Params Descriptions
 `message` tool params:
 
+**重要提示：发送视频文件（如 .mp4、.mov、.avi、.mkv、.flv、.wmv、.webm 等视频格式）时，必须使用 `send_video`，绝对不要使用 `send_file`。`send_file` 仅用于发送非图片、非视频的普通文件（如文档、压缩包等）。**
 
-# 发送图片消息
+# 发送图片消息（用于发送图片文件，如 .png、.jpg、.jpeg、.gif、.bmp 等图片格式）
 ```json
 {
     "action": "send_pic",
@@ -30,15 +31,23 @@ Use this skill to start and manage Feishu (Lark) bot, send messages through Feis
 }
 ```
 
-# 发送文件
+# 发送视频消息（用于发送视频文件，如 .mp4、.mov、.avi、.mkv、.flv、.wmv、.webm 等视频格式。注意：任何视频文件都必须使用此 action，不要使用 send_file）
 ```json
 {
-    "action": "send_file",
-    "path": "xxxx.png"
+    "action": "send_video",
+    "path": "xxxx.mp4"
 }
 ```
 
-# 发送文本消息
+# 发送普通文件（仅用于发送非图片、非视频的普通文件，如 .pdf、.docx、.xlsx、.zip、.txt 等。视频文件请使用 send_video，图片文件请使用 send_pic）
+```json
+{
+    "action": "send_file",
+    "path": "xxxx.pdf"
+}
+```
+
+# 发送文本消息（用于发送纯文本内容）
 ```json
 {
     "action": "send_text",

@@ -77,7 +77,7 @@ class ModelRegistry:
         self._models: dict[str, ModelConfig] = {}
         self._default: str = ""
         self._summary_model: str = ""
-        self._multimodal_model: str = ""
+        self._multimodal_models: dict[str, str] = {}  # {"audio": "...", "image": "...", "video": "..."}
         self._ollama_host: str = DEFAULT_OLLAMA_HOST
         self._auto_discover_ollama_enabled: bool = True
 
@@ -156,8 +156,12 @@ class ModelRegistry:
             # 加载摘要模型
             self._summary_model = data.get("summary_model", "")
 
-            # 加载多模态预处理模型
-            self._multimodal_model = data.get("multimodal_model", "")
+            # 加载多模态预处理模型（按媒体类型分别配置）
+            mm_config = data.get("multimodal_model", {})
+            if isinstance(mm_config, dict):
+                self._multimodal_models = {
+                    k: v for k, v in mm_config.items() if isinstance(v, str)
+                }
 
             # 加载 Ollama 配置
             ollama_config = data.get("ollama", {})
@@ -300,9 +304,19 @@ class ModelRegistry:
         """获取摘要模型名，未配置时回退到默认模型"""
         return self._summary_model or self._default
 
-    def get_multimodal_model(self) -> str:
-        """获取多模态预处理模型名，未配置时回退到默认模型"""
-        return self._multimodal_model or self._default
+    def get_multimodal_model(self, media_type: str | None = None) -> str:
+        """获取多模态预处理模型名。
+
+        Args:
+            media_type: 媒体类型（"audio"/"image"/"video"），为 None 时返回 image 模型或默认模型。
+
+        Returns:
+            对应媒体类型的模型配置名，未配置时回退到默认模型。
+        """
+        if media_type and media_type in self._multimodal_models:
+            return self._multimodal_models[media_type]
+        # 回退：优先返回 image 模型（通常最通用），再回退到默认模型
+        return self._multimodal_models.get("image", self._default)
 
     def has_model(self, name: str) -> bool:
         """检查模型是否存在"""

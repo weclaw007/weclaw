@@ -29,8 +29,8 @@ class Server:
         print(f"监听地址: ws://{self.host}:{self.port}")
         print("=" * 60)
 
-        # 启动服务器
-        async with websockets.serve(self.handle_connection, self.host, self.port):
+        # 启动服务器（max_size 设为 100MB，以支持 Base64 编码的视频文件传输）
+        async with websockets.serve(self.handle_connection, self.host, self.port, max_size=100 * 1024 * 1024):
             print("服务器已启动，等待客户端连接...")
             print("按 Ctrl+C 停止服务器")
             print("=" * 60)

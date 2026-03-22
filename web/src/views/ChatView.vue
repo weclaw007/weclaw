@@ -66,8 +66,19 @@
                 </div>
                 <span class="voice-duration">{{ msg.audioDuration || '' }}</span>
               </div>
+              <!-- 用户消息中的图片缩略图 -->
+              <div v-if="msg.images && msg.images.length" class="msg-images">
+                <img v-for="(src, i) in msg.images" :key="i" :src="src" class="msg-image-thumb" />
+              </div>
+              <!-- 用户消息中的视频缩略图 -->
+              <div v-if="msg.videos && msg.videos.length" class="msg-videos">
+                <div v-for="(v, i) in msg.videos" :key="i" class="msg-video-thumb-wrapper">
+                  <video :src="v" class="msg-video-thumb" muted preload="metadata"></video>
+                  <span class="msg-video-play-icon">▶</span>
+                </div>
+              </div>
               <!-- 普通文本消息 -->
-              <span v-else>{{ msg.content }}</span>
+              <span v-if="msg.content && !msg.audioData">{{ msg.content }}</span>
             </template>
           </div>
         </div>
@@ -94,6 +105,22 @@
 
     <!-- 输入区域 -->
     <div class="chat-input-area">
+      <!-- 图片预览区域 -->
+      <div v-if="selectedImages.length > 0" class="image-preview-area">
+        <div v-for="(img, idx) in selectedImages" :key="idx" class="image-preview-item">
+          <img :src="img.previewUrl" class="image-thumbnail" />
+          <span class="image-remove-btn" @click="removeImage(idx)">&times;</span>
+        </div>
+      </div>
+      <!-- 视频预览区域 -->
+      <div v-if="selectedVideos.length > 0" class="video-preview-area">
+        <div v-for="(vid, idx) in selectedVideos" :key="idx" class="video-preview-item">
+          <video :src="vid.previewUrl" class="video-thumbnail" muted preload="metadata"></video>
+          <span class="video-play-icon">▶</span>
+          <span class="video-remove-btn" @click="removeVideo(idx)">&times;</span>
+          <span class="video-name-tag">{{ vid.file.name }}</span>
+        </div>
+      </div>
       <div class="input-wrapper">
         <el-input
           v-model="inputText"
@@ -108,13 +135,22 @@
           type="primary"
           :icon="Promotion"
           @click="handleSend"
-          :disabled="!inputText.trim() || !connected"
+          :disabled="(!inputText.trim() && selectedImages.length === 0 && selectedVideos.length === 0) || !connected"
           :loading="isTyping"
           circle
           class="send-btn"
         />
+        <el-button type="info" :icon="Picture" :disabled="!connected" circle class="image-btn"
+          @click="triggerImageSelect" />
+        <el-button type="warning" :icon="Film" :disabled="!connected" circle class="video-btn"
+          @click="triggerVideoSelect" />
         <el-button type="success" :icon="Microphone" :disabled="!connected" circle class="voice-btn"
           :class="{ recording: isRecording }" @click="toggleRecording" />
+        <!-- 隐藏的文件选择器 -->
+        <input type="file" ref="imageFileInput" accept="image/*" multiple style="display: none"
+          @change="onImageSelected" />
+        <input type="file" ref="videoFileInput" accept="video/*" multiple style="display: none"
+          @change="onVideoSelected" />
       </div>
       <div class="input-tips">
         <span v-if="!connected" class="disconnected-tip">
@@ -132,7 +168,7 @@
 
 <script setup>
 import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
-import { Promotion, Check, Microphone, VideoPlay, VideoPause } from '@element-plus/icons-vue'
+import { Promotion, Check, Microphone, VideoPlay, VideoPause, Picture, Film } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 
 const props = defineProps({
@@ -261,12 +297,17 @@ function stopRecordingAndSend() {
   messages.value.push({ role: 'assistant', content: '' })
   scrollToBottom()
 
-  // 通过 websocket 发送给服务端（新的列表格式）
+  // 构建 extra 参数（同时发送图片、视频和音频）
+  const extra = {
+    ...buildMediaExtra(),
+    audio: [{ type: 'base64', data: base64, mime: 'audio/wav' }],
+  }
+  clearAllMedia()
+
+  // 通过 websocket 发送给服务端
   emit('send-message', '', (messageId) => {
     currentMessageId.value = messageId
-  }, {
-    audio: [{ type: 'base64', data: base64, mime: 'audio/wav' }],
-  })
+  }, extra)
 }
 
 /**
@@ -338,6 +379,173 @@ const messagesContainer = ref(null)
 const personaInput = ref('')
 const currentPersona = ref('')  // 记录当前已保存的人格，用于判断是否有修改
 
+// ========== 图片选择相关 ==========
+const selectedImages = ref([])  // { file: File, previewUrl: string, base64: string, mime: string }
+const imageFileInput = ref(null)
+
+// ========== 视频选择相关 ==========
+const selectedVideos = ref([])  // { file: File, previewUrl: string, base64: string, mime: string }
+const videoFileInput = ref(null)
+
+/**
+ * 触发文件选择对话框
+ */
+function triggerImageSelect() {
+  if (imageFileInput.value) {
+    imageFileInput.value.value = ''  // 清空以允许重复选择同一文件
+    imageFileInput.value.click()
+  }
+}
+
+/**
+ * 文件选择回调，读取图片并生成预览和 Base64 数据
+ */
+function onImageSelected(event) {
+  const files = event.target.files
+  if (!files || files.length === 0) return
+
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const dataUrl = e.target.result  // data:image/xxx;base64,...
+      // 提取纯 Base64 数据
+      const base64 = dataUrl.split(',')[1]
+      selectedImages.value.push({
+        file,
+        previewUrl: dataUrl,
+        base64,
+        mime: file.type,
+      })
+    }
+    reader.readAsDataURL(file)
+  }
+}
+
+/**
+ * 移除已选择的图片
+ */
+function removeImage(index) {
+  selectedImages.value.splice(index, 1)
+}
+
+/**
+ * 触发视频文件选择对话框
+ */
+function triggerVideoSelect() {
+  if (videoFileInput.value) {
+    videoFileInput.value.value = ''
+    videoFileInput.value.click()
+  }
+}
+
+/**
+ * 视频文件选择回调，读取视频并生成预览和 Base64 数据
+ * 限制单个视频文件不超过 50MB（Base64 编码后约 67MB，需在 WebSocket max_size 限制内）
+ */
+const MAX_VIDEO_SIZE_MB = 50
+function onVideoSelected(event) {
+  const files = event.target.files
+  if (!files || files.length === 0) return
+
+  for (const file of files) {
+    if (!file.type.startsWith('video/')) continue
+    // 检查文件大小
+    const sizeMB = file.size / (1024 * 1024)
+    if (sizeMB > MAX_VIDEO_SIZE_MB) {
+      import('element-plus').then(({ ElMessage }) => {
+        ElMessage.warning(`视频文件 "${file.name}" 太大（${sizeMB.toFixed(1)}MB），最大支持 ${MAX_VIDEO_SIZE_MB}MB`)
+      })
+      continue
+    }
+    const previewUrl = URL.createObjectURL(file)
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const dataUrl = e.target.result
+      const base64 = dataUrl.split(',')[1]
+      selectedVideos.value.push({
+        file,
+        previewUrl,
+        base64,
+        mime: file.type,
+      })
+    }
+    reader.readAsDataURL(file)
+  }
+}
+
+/**
+ * 移除已选择的视频
+ */
+function removeVideo(index) {
+  const vid = selectedVideos.value[index]
+  if (vid && vid.previewUrl) {
+    URL.revokeObjectURL(vid.previewUrl)
+  }
+  selectedVideos.value.splice(index, 1)
+}
+
+/**
+ * 构建图片的 extra 数据（用于发送给服务端）
+ */
+function buildImageExtra() {
+  if (selectedImages.value.length === 0) return {}
+  const imageList = selectedImages.value.map((img) => ({
+    type: 'base64',
+    data: img.base64,
+    mime: img.mime,
+  }))
+  return { image: imageList }
+}
+
+/**
+ * 构建视频的 extra 数据（用于发送给服务端）
+ */
+function buildVideoExtra() {
+  if (selectedVideos.value.length === 0) return {}
+  const videoList = selectedVideos.value.map((vid) => ({
+    type: 'base64',
+    data: vid.base64,
+    mime: vid.mime,
+  }))
+  return { video: videoList }
+}
+
+/**
+ * 构建所有媒体的 extra 数据
+ */
+function buildMediaExtra() {
+  return {
+    ...buildImageExtra(),
+    ...buildVideoExtra(),
+  }
+}
+
+/**
+ * 清空已选图片
+ */
+function clearSelectedImages() {
+  selectedImages.value = []
+}
+
+/**
+ * 清空已选视频（释放 ObjectURL）
+ */
+function clearSelectedVideos() {
+  selectedVideos.value.forEach((vid) => {
+    if (vid.previewUrl) URL.revokeObjectURL(vid.previewUrl)
+  })
+  selectedVideos.value = []
+}
+
+/**
+ * 清空所有已选媒体
+ */
+function clearAllMedia() {
+  clearSelectedImages()
+  clearSelectedVideos()
+}
+
 /**
  * 监听父组件传入的 persona prop 变化，同步到输入框
  */
@@ -388,10 +596,28 @@ function handleSend(e) {
   if (e) e.preventDefault()
 
   const text = inputText.value.trim()
-  if (!text || !props.connected) return
+  const hasImages = selectedImages.value.length > 0
+  const hasVideos = selectedVideos.value.length > 0
+  const hasMedia = hasImages || hasVideos
+  if ((!text && !hasMedia) || !props.connected) return
 
-  // 添加用户消息
-  messages.value.push({ role: 'user', content: text })
+  // 构建默认提示文本
+  let placeholder = ''
+  if (!text && hasMedia) {
+    const labels = []
+    if (hasImages) labels.push('🖼️ 图片')
+    if (hasVideos) labels.push('🎬 视频')
+    placeholder = `[${labels.join(' + ')}]`
+  }
+
+  // 构建用户消息显示内容（包含图片和视频缩略图）
+  const userMsg = {
+    role: 'user',
+    content: text || placeholder,
+    images: hasImages ? selectedImages.value.map((img) => img.previewUrl) : undefined,
+    videos: hasVideos ? selectedVideos.value.map((vid) => vid.previewUrl) : undefined,
+  }
+  messages.value.push(userMsg)
   inputText.value = ''
   isTyping.value = true
 
@@ -399,10 +625,14 @@ function handleSend(e) {
   messages.value.push({ role: 'assistant', content: '' })
   scrollToBottom()
 
+  // 构建 extra 参数（包含图片和视频数据）
+  const extra = buildMediaExtra()
+  clearAllMedia()
+
   // 通知父组件发送消息
   emit('send-message', text, (messageId) => {
     currentMessageId.value = messageId
-  })
+  }, extra)
 }
 
 /**
@@ -707,6 +937,193 @@ defineExpose({ onMessageComplete, onServerPushMessage })
   height: 40px;
 }
 
+/* 图片选择按钮 */
+.image-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+}
+
+/* 视频选择按钮 */
+.video-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+}
+/* 图片预览区域 */
+.image-preview-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.image-preview-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #e4e7ed;
+  flex-shrink: 0;
+}
+
+.image-thumbnail {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.image-remove-btn {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 18px;
+  height: 18px;
+  background: #f56c6c;
+  color: #fff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.15s;
+  z-index: 1;
+}
+
+.image-remove-btn:hover {
+  transform: scale(1.15);
+  background: #e04040;
+}
+
+/* 消息气泡中的图片缩略图 */
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.msg-image-thumb {
+  width: 80px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+/* 消息气泡中的视频缩略图 */
+.msg-videos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.msg-video-thumb-wrapper {
+  position: relative;
+  width: 100px;
+  height: 75px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.msg-video-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.msg-video-play-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 20px;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+/* 视频预览区域 */
+.video-preview-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.video-preview-item {
+  position: relative;
+  width: 100px;
+  height: 75px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #e4e7ed;
+  flex-shrink: 0;
+}
+
+.video-thumbnail {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-play-icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 22px;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.video-remove-btn {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 18px;
+  height: 18px;
+  background: #f56c6c;
+  color: #fff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.15s;
+  z-index: 1;
+}
+
+.video-remove-btn:hover {
+  transform: scale(1.15);
+  background: #e04040;
+}
+
+.video-name-tag {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 1px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
 .input-tips {
   margin-top: 8px;
   font-size: 14px;
@@ -738,6 +1155,7 @@ defineExpose({ onMessageComplete, onServerPushMessage })
 .connected-tip .el-icon {
   font-size: 16px;
 }
+
 /* 语音消息播放样式 */
 .voice-message {
   display: flex;

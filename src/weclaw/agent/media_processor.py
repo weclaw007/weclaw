@@ -199,20 +199,18 @@ def _build_video_content(input_content: Dict[str, Any]) -> Optional[list[dict]]:
 
 async def process_media(
     input_content: Dict[str, Any],
-    multimodal_model_name: str | None = None,
 ) -> str:
     """将包含媒体的输入通过多模态模型预处理为纯文本描述。
 
     处理流程：
     1. 检测 input_content 中是否包含 image/audio/video（base64 或文件路径）
     2. 如果没有媒体字段，直接返回原始 text
-    3. 构造 OpenAI 标准多模态 content 数组
-    4. 调用多模态模型获取文本描述
-    5. 将文本描述与原始 text 合并返回
+    3. 针对不同媒体类型，从 models.yaml 中读取各自配置的专属模型分别处理
+    4. 同一类型的多个媒体项使用同一个模型实例
+    5. 将所有文本描述合并返回
 
     Args:
         input_content: 前端发送的消息 dict，可能包含 text/image/audio/video 等字段
-        multimodal_model_name: 多模态模型配置名（对应 models.yaml），为 None 时使用配置中的 multimodal_model
 
     Returns:
         纯文本字符串，可直接交给 Agent 处理
@@ -226,20 +224,9 @@ async def process_media(
     if not _has_media(input_content):
         return text
 
-    # 确定使用的多模态模型
     registry = ModelRegistry.get_instance()
-    model_name = multimodal_model_name or registry.get_multimodal_model()
-    if not model_name:
-        logger.warning("No multimodal model configured, falling back to default model")
-        model_name = None  # 会使用默认模型
 
-    # 创建多模态模型实例
-    llm = registry.create_chat_model(
-        name=model_name,
-        request_timeout=120,
-    )
-
-    # 构建所有媒体类型的 content，支持同时包含多种媒体
+    # 每种媒体类型对应的 content 构建器
     builders = [
         ("audio", _build_audio_content),
         ("image", _build_image_content),
@@ -247,6 +234,9 @@ async def process_media(
     ]
 
     from langchain_core.messages import HumanMessage
+
+    # 缓存已创建的模型实例，相同模型名复用同一实例
+    _model_cache: Dict[str, Any] = {}
 
     parts = []
     if text:
@@ -257,6 +247,20 @@ async def process_media(
         if content is None:
             continue
 
+        # 从配置文件中按媒体类型获取对应的模型
+        model_name = registry.get_multimodal_model(media_type)
+        if not model_name:
+            logger.warning(f"No model configured for {media_type}, falling back to default model")
+
+        # 复用已创建的模型实例（相同模型名不重复创建）
+        cache_key = model_name or "__default__"
+        if cache_key not in _model_cache:
+            _model_cache[cache_key] = registry.create_chat_model(
+                name=model_name,
+                request_timeout=120,
+            )
+        llm = _model_cache[cache_key]
+
         try:
             logger.info(f"Processing {media_type} media with model: {model_name or 'default'}")
             response = await llm.ainvoke([HumanMessage(content=content)])
@@ -266,7 +270,7 @@ async def process_media(
             if extracted_text:
                 parts.append(extracted_text)
         except Exception as e:
-            logger.exception(f"Failed to process {media_type} media: {e}")
+            logger.exception(f"Failed to process {media_type} media with model '{model_name}': {e}")
             parts.append(f"[System: Failed to process {media_type} content - {e}]")
 
     if not parts:
