@@ -113,10 +113,17 @@ async def write_local_file(file_path: str, content: str, mode: str = "overwrite"
 
 
 @tool
-async def run_command(command: str, timeout: int = 60) -> str:
-    """执行命令行工具（Windows: powershell，其他: bash）。"""
+async def exec(command: str, timeout: int = 60) -> str:
+    """在系统 Shell 中执行命令并返回输出结果（Windows 使用 PowerShell，macOS/Linux 使用 Bash）。
+
+    适用场景：运行脚本、调用 CLI 工具、查询系统信息、安装依赖、文件操作等一切需要命令行完成的任务。
+
+    Args:
+        command: 要执行的完整命令字符串，如 'ls -la' 或 'python script.py'
+        timeout: 命令超时时间（秒），默认 60 秒
+    """
     try:
-        logger.info(f'run_command: {command}')
+        logger.info(f'exec: {command}')
         result = await _run_command_async(command, timeout=timeout, capture=True)
 
         stdout = result.get("stdout", "").strip()
@@ -212,7 +219,7 @@ class Agent:
         _read_tool_result = self._create_read_tool_result_tool(resolved_session_id)
 
         # 默认注入系统工具，支持调用方追加自定义工具。
-        tools = [run_command, read_local_file, write_local_file, read_skill, _read_tool_result, *(custom_tools or [])]
+        tools = [exec, read_local_file, write_local_file, read_skill, _read_tool_result, *(custom_tools or [])]
         self.agent = create_agent(
             model=llm,
             checkpointer=checkpoint,

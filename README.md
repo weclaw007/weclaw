@@ -11,7 +11,7 @@ Weclaw is a mini OpenClaw built on the Python LangChain framework. It is an easy
 1. 克隆仓库：
 
 ```
-git clone https://github.com/kkbig509/weclaw.git
+git clone https://github.com/weclaw007/weclaw
 cd your-repo
 ```
 
