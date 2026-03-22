@@ -184,10 +184,21 @@ export function useWebSocket(url = 'ws://localhost:4567') {
       const success = response.success
       if (success) {
         console.log(`[WebSocket] 技能 ${skillName} 的 API Key 已保存到 .env 文件`)
-        // 刷新技能列表以更新 primaryEnv 显示状态
+        // 刷新技能列表以更新环境变量显示状态
         sendSystemMessage('get_skills')
       } else {
         console.error(`[WebSocket] 保存 API Key 失败: ${response.error || '未知错误'}`)
+      }
+    } else if (action === 'save_env_list') {
+      // 后端确认批量保存环境变量结果
+      const skillName = response.skill_name
+      const success = response.success
+      if (success) {
+        console.log(`[WebSocket] 技能 ${skillName} 的环境变量已批量保存到 .env 文件`)
+        // 刷新技能列表以更新环境变量显示状态
+        sendSystemMessage('get_skills')
+      } else {
+        console.error(`[WebSocket] 批量保存环境变量失败: ${response.error || '未知错误'}`)
       }
     }
   }
@@ -236,7 +247,7 @@ export function useWebSocket(url = 'ws://localhost:4567') {
   /**
    * 发送用户消息 - 简化版，返回 { messageId, promise }
    */
-  function sendMessage(text) {
+  function sendMessage(text, extra = {}) {
     if (!ws.value || ws.value.readyState !== WebSocket.OPEN) {
       return { messageId: null, promise: Promise.reject(new Error('WebSocket 未连接')) }
     }
@@ -246,6 +257,7 @@ export function useWebSocket(url = 'ws://localhost:4567') {
       id: messageId,
       type: 'user',
       text,
+      ...extra,
     }
 
     responseBuffers.value[messageId] = ''

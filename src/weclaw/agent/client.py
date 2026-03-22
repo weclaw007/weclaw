@@ -8,6 +8,7 @@ import websockets
 from langchain_core.tools import BaseTool, tool
 
 from weclaw.agent.agent import Agent
+from weclaw.agent.media_processor import process_media
 from weclaw.agent.skill_manager import SkillManager
 from weclaw.agent.handlers import SkillHandler, ModelHandler, EnvHandler, PersonaHandler, BaseHandler
 from weclaw.utils.agent_config import AgentConfig
@@ -516,11 +517,21 @@ class Client:
         {
             "id": "unique-message-id",
             "type": "user",
-            "text": "abc",
-            "image": "/path/to/image.png",
-            "audio": "/path/to/audio.wav",
-            "video": "/path/to/video.mp4"
+            "text": "描述这些内容",
+            "image": [
+                {"type": "file", "data": "/path/1.jpg"},
+                {"type": "url", "data": "https://..."}
+            ],
+            "audio": [
+                {"type": "file", "data": "/path/audio.wav"},
+                {"type": "base64", "data": "...", "mime": "audio/wav"}
+            ],
+            "video": [
+                {"type": "url", "data": "https://...mp4"}
+            ]
         }
+        
+        媒体项 type 支持: "file"（本地文件路径）、"url"（URL链接）、"base64"（Base64编码数据）
         
         响应格式:
         开始: {"id": "unique-message-id", "type": "start"}
@@ -536,8 +547,11 @@ class Client:
         try:
             logger.info(f"处理 user 消息 [{message_id}]: {request}")
 
+            # 媒体预处理：将音频/图片/视频通过多模态模型转为纯文本
+            prompt = await process_media(request)
+
             # 使用 agent 处理并流式返回结果（入队串行执行）
-            await self._enqueue_stream_response(request, message_id)
+            await self._enqueue_stream_response(prompt, message_id)
             logger.info(f"user 消息已入队 [{message_id}]")
 
         except Exception as e:

@@ -19,13 +19,19 @@ class SkillHandler(BaseHandler):
         skills = skill_manager.get_skills_for_current_os()
         skills_json = []
         for skill, value in skills.items():
-            env_name = value.get("metadata", {}).get("openclaw", {}).get("primaryEnv", "")
+            openclaw = value.get("metadata", {}).get("openclaw", {})
+            # 从 requires.env 数组中读取所有需要的环境变量
+            env_keys = openclaw.get("requires", {}).get("env", [])
+            # 将 primaryEnv 也合并进去（如果存在且不在 env_keys 中）
+            primary_env = openclaw.get("primaryEnv", "")
+            if primary_env and primary_env not in env_keys:
+                env_keys = [primary_env] + list(env_keys)
+            env_list = [{"envName": k, "envValue": os.getenv(k, "")} for k in env_keys]
             skills_json.append({
                 "name": value["name"],
                 "description": value["description"],
-                "emoji": value.get("metadata", {}).get("openclaw", {}).get("emoji", ""),
-                "primaryEnv": os.getenv(env_name) if env_name else "",
-                "envName": env_name,
+                "emoji": openclaw.get("emoji", ""),
+                "envList": env_list,
                 "enabled": skill_manager.is_skill_enabled(skill),
                 "builtin": value.get("_builtin", True),
             })

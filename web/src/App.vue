@@ -64,6 +64,7 @@
         @refresh-skills="onRefreshSkills"
         @toggle-skill="onToggleSkill"
         @save-api-key="onSaveApiKey"
+        @save-env-list="onSaveEnvList"
       />
     </el-main>
   </el-container>
@@ -118,8 +119,8 @@ function onModelChange(modelName) {
 /**
  * 发送聊天消息
  */
-function onSendMessage(text, callback) {
-  const { messageId, promise } = sendMessage(text)
+function onSendMessage(text, callback, extra = {}) {
+  const { messageId, promise } = sendMessage(text, extra)
 
   // 通知 ChatView 消息 ID
   if (callback) callback(messageId)
@@ -166,6 +167,16 @@ function onSaveApiKey(skillName, envName, apiKey) {
     skill_name: skillName,
     env_name: envName,
     api_key: apiKey,
+  })
+}
+
+/**
+ * 批量保存环境变量
+ */
+function onSaveEnvList(skillName, envList) {
+  sendSystemMessage('save_env_list', {
+    skill_name: skillName,
+    env_list: envList,
   })
 }
 

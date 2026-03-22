@@ -6,14 +6,8 @@
         <el-button :icon="Refresh" @click="refreshSkills" :loading="loading">
           刷新
         </el-button>
-        <el-input
-          v-model="searchText"
-          placeholder="搜索技能..."
-          :prefix-icon="Search"
-          clearable
-          size="default"
-          class="search-input"
-        />
+        <el-input v-model="searchText" placeholder="搜索技能..." :prefix-icon="Search" clearable size="default"
+          class="search-input" />
         <span class="skills-count" v-if="skills.length > 0">
           共 {{ filteredSkills.length }} 个技能，已启用 {{ enabledCount }} 个
         </span>
@@ -22,77 +16,53 @@
         </span>
       </div>
       <div class="header-right">
-        <el-pagination
-          v-model:current-page="currentPage"
-          :page-size="pageSize"
-          :total="filteredSkills.length"
-          layout="prev, pager, next"
-          small
-          background
-        />
+        <el-pagination v-model:current-page="currentPage" :page-size="pageSize" :total="filteredSkills.length"
+          layout="prev, pager, next" small background />
       </div>
     </div>
 
     <!-- 技能卡片列表 -->
     <div class="skills-grid">
-      <el-card
-        v-for="skill in pagedSkills"
-        :key="skill.name"
-        class="skill-card"
-        :class="{ 'skill-card-with-env': skill.envName }"
-        shadow="hover"
-      >
+      <el-card v-for="skill in pagedSkills" :key="skill.name" class="skill-card"
+        :class="{ 'skill-card-with-env': skill.envList && skill.envList.length > 0 }" shadow="hover">
         <div class="skill-card-header">
           <div class="skill-info">
             <div class="skill-name">
               <span class="skill-emoji">{{ skill.emoji || '🔧' }}</span>
-              <strong :class="{ 'skill-name-warning': skill.envName && !skill.primaryEnv }">
+              <strong :class="{ 'skill-name-warning': hasUnsetEnv(skill) }">
                 {{ skill.name }}
-                <el-icon v-if="skill.envName && !skill.primaryEnv" class="warning-icon"><WarningFilled /></el-icon>
+                <el-icon v-if="hasUnsetEnv(skill)" class="warning-icon">
+                  <WarningFilled />
+                </el-icon>
               </strong>
             </div>
             <p class="skill-desc">{{ skill.description }}</p>
             <div class="skill-tags">
-              <el-tag
-                :type="skill.builtin ? 'info' : 'primary'"
-                size="small"
-                effect="plain"
-              >
-                {{ skill.builtin ? 'openclaw-bundled' : 'third-party' }}
+              <el-tag :type="skill.builtin ? 'info' : 'primary'" size="small" effect="plain">
+                {{ skill.builtin ? 'weclaw-bundled' : 'third-party' }}
               </el-tag>
             </div>
           </div>
           <div class="skill-actions">
-            <el-switch
-              :model-value="skill.enabled"
-              @change="(val) => toggleSkill(skill, val)"
-              :active-text="'启用'"
-              :inactive-text="'禁用'"
-            />
+            <el-switch :model-value="skill.enabled" @change="(val) => toggleSkill(skill, val)" :active-text="'启用'"
+              :inactive-text="'禁用'" />
           </div>
         </div>
 
-        <!-- API Key 配置 -->
-        <div v-if="skill.envName" class="skill-env">
+        <!-- 环境变量配置 -->
+        <div v-if="skill.envList && skill.envList.length > 0" class="skill-env">
           <el-divider />
-          <div class="env-row">
-            <el-input
-              :model-value="getApiKeyInput(skill.name)"
-              @update:model-value="(val) => setApiKeyInput(skill.name, val)"
-              :placeholder="`请输入 ${skill.envName}`"
-              type="password"
-              show-password
-              size="small"
-              class="env-input"
-            >
-              <template #prepend>{{ skill.envName }}</template>
+          <div v-for="(envItem, idx) in skill.envList" :key="envItem.envName" class="env-row"
+            :class="{ 'env-row-gap': idx > 0 }">
+            <el-input :model-value="getEnvInput(skill.name, envItem.envName)"
+              @update:model-value="(val) => setEnvInput(skill.name, envItem.envName, val)"
+              :placeholder="`请输入 ${envItem.envName}`" type="password" show-password size="small" class="env-input">
+              <template #prepend>{{ envItem.envName }}</template>
             </el-input>
-            <el-button
-              type="danger"
-              size="small"
-              @click="saveApiKey(skill)"
-              :loading="savingStates[skill.name] || false"
-            >
+          </div>
+          <div class="env-save-row">
+            <el-button type="danger" size="small" @click="saveEnvList(skill)"
+              :loading="savingStates[skill.name] || false">
               保存
             </el-button>
           </div>
@@ -121,15 +91,16 @@ const props = defineProps({
   connected: Boolean,
 })
 
-const emit = defineEmits(['refresh-skills', 'toggle-skill', 'save-api-key'])
+const emit = defineEmits(['refresh-skills', 'toggle-skill', 'save-api-key', 'save-env-list'])
 
 const loading = ref(false)
 const currentPage = ref(1)
 const searchText = ref('')
 const pageSize = 9
 
-// 独立管理每个技能的 API Key 输入值和保存状态
-const apiKeyInputs = reactive({})
+// 独立管理每个技能的环境变量输入值和保存状态
+// envInputs 结构: { skillName: { envName: value, ... }, ... }
+const envInputs = reactive({})
 const savingStates = reactive({})
 
 /**
@@ -162,26 +133,40 @@ const pagedSkills = computed(() => {
 })
 
 /**
- * 获取技能的 API Key 输入值
+ * 判断技能是否有未设置的环境变量
  */
-function getApiKeyInput(skillName) {
-  return apiKeyInputs[skillName] ?? ''
+function hasUnsetEnv(skill) {
+  if (!skill.envList || skill.envList.length === 0) return false
+  return skill.envList.some((item) => !item.envValue)
 }
 
 /**
- * 设置技能的 API Key 输入值
+ * 获取技能某个环境变量的输入值
  */
-function setApiKeyInput(skillName, value) {
-  apiKeyInputs[skillName] = value
+function getEnvInput(skillName, envName) {
+  return envInputs[skillName]?.[envName] ?? ''
 }
 
 /**
- * 初始化技能的 API Key 输入值（仅在未手动编辑过时设置）
+ * 设置技能某个环境变量的输入值
  */
-function initApiKeyInputs(skills) {
+function setEnvInput(skillName, envName, value) {
+  if (!envInputs[skillName]) {
+    envInputs[skillName] = {}
+  }
+  envInputs[skillName][envName] = value
+}
+
+/**
+ * 初始化技能的环境变量输入值（仅在未手动编辑过时设置）
+ */
+function initEnvInputs(skills) {
   for (const skill of skills) {
-    if (skill.envName && !(skill.name in apiKeyInputs)) {
-      apiKeyInputs[skill.name] = skill.primaryEnv || ''
+    if (skill.envList && skill.envList.length > 0 && !(skill.name in envInputs)) {
+      envInputs[skill.name] = {}
+      for (const item of skill.envList) {
+        envInputs[skill.name][item.envName] = item.envValue || ''
+      }
     }
   }
 }
@@ -206,20 +191,24 @@ function toggleSkill(skill, enabled) {
 }
 
 /**
- * 保存 API Key
+ * 批量保存环境变量
  */
-function saveApiKey(skill) {
-  const value = apiKeyInputs[skill.name] || ''
-  if (!value) {
-    ElMessage.warning('请输入 API Key')
+function saveEnvList(skill) {
+  const inputs = envInputs[skill.name] || {}
+  const envList = Object.entries(inputs)
+    .filter(([, value]) => value)
+    .map(([envName, envValue]) => ({ envName, envValue }))
+
+  if (envList.length === 0) {
+    ElMessage.warning('请至少填写一个环境变量')
     return
   }
   savingStates[skill.name] = true
-  emit('save-api-key', skill.name, skill.envName, value)
+  emit('save-env-list', skill.name, envList)
   // 模拟保存完成（后续可改为等待 WebSocket 回调）
   setTimeout(() => {
     savingStates[skill.name] = false
-    ElMessage.success('API Key 已保存')
+    ElMessage.success('环境变量已保存')
   }, 500)
 }
 
@@ -234,12 +223,12 @@ watch(
   }
 )
 
-// 当技能列表加载/刷新时，初始化 API Key 输入值
+// 当技能列表加载/刷新时，初始化环境变量输入值
 watch(
   () => props.skills,
   (skills) => {
     if (skills && skills.length > 0) {
-      initApiKeyInputs(skills)
+      initEnvInputs(skills)
     }
   },
   { immediate: true }
@@ -301,7 +290,7 @@ watch(
 }
 
 .skill-card-with-env :deep(.el-card__body) {
-  min-height: 220px;
+  min-height: 240px;
 }
 
 .skill-card:hover {
@@ -375,6 +364,15 @@ watch(
   align-items: center;
 }
 
+.env-row-gap {
+  margin-top: 8px;
+}
+
+.env-save-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
 .env-input {
   flex: 1;
 }

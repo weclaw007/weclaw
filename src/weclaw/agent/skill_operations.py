@@ -82,8 +82,9 @@ async def check_skills_installed(skill_metadata: dict[str, Any]) -> bool:
     参数：
         skill_metadata: 技能的 front_matter 元数据对象
 
-    只判断 openclaw.requires.bins 中要求的二进制文件是否存在于 PATH 中（或安装类型对应的额外目录中）。
-    如果没有定义 requires.bins，则视为已安装（无外部依赖）。
+    判断 openclaw.requires.bins 中要求的二进制文件是否存在于 PATH 中（或安装类型对应的额外目录中），
+    以及 openclaw.requires.env 中要求的环境变量是否已设置。
+    如果没有定义 requires，则视为已安装（无外部依赖）。
 
     返回：True（已安装）或 False（未安装）
     """
@@ -93,8 +94,15 @@ async def check_skills_installed(skill_metadata: dict[str, Any]) -> bool:
     openclaw = skill_metadata.get("metadata", {}).get("openclaw", {})
     requires = openclaw.get("requires", {})
     bins = requires.get("bins", [])
+    env_keys = requires.get("env", [])
 
-    # 如果没有定义 requires.bins，视为无外部依赖，直接返回已安装
+    # 检查 requires.env 中要求的环境变量是否已设置
+    if env_keys:
+        for key in env_keys:
+            if not os.environ.get(key):
+                return False
+
+    # 如果没有定义 requires.bins，视为无外部二进制依赖
     if not bins:
         return True
 

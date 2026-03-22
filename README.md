@@ -104,6 +104,7 @@ Weclaw 内置了飞书（Lark）机器人技能，支持通过飞书自建应用
 ### 支持功能
 
 - 📝 文本消息：发送文本消息，AI 助手自动回复
+- 🎙️ 语音消息：发送语音消息，AI 助手自动识别语音内容并回复
 - 📍 位置消息：发送位置信息，AI 助手可获取经纬度和地名进行处理
 - 🤖 命令控制：支持 `/start`、`/stop`、`/help` 命令
 - 🔄 断线重连：WebSocket 连接断开后自动重连
@@ -193,7 +194,7 @@ Weclaw 内置了 [MCP（Model Context Protocol）](https://modelcontextprotocol.
 - 基于 LangChain 的 agent 结构，便于扩展与定制。
 - 与 OpenClaw skills 兼容，能复用现有技能集。
 - 轻量、易上手，默认无需复杂配置即可运行。
-- **Vue Web UI**：基于 Vue 3 + Element Plus 构建的现代化 Web 界面，支持聊天对话、技能管理等功能。
+- **Vue Web UI**：基于 Vue 3 + Element Plus 构建的现代化 Web 界面，支持聊天对话、语音输入、技能管理等功能。
 - **多模型支持**：通过统一的 `models.yaml` 配置文件管理所有厂商大模型，在 UI 中一键切换。
 - **本地 Ollama 模型**：自动发现本地已安装的 Ollama 模型，无需额外配置即可使用。
 

@@ -16,9 +16,9 @@
 
 models:
   # ── 阿里云 DashScope（OpenAI 兼容协议）──
-  qwen-plus:
+  qwen3:
     provider: openai
-    model: qwen-plus-2025-07-28
+    model: qwen-plus-0112
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
 
@@ -34,9 +34,17 @@ models:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
 
+  # 全模态
   qwen-vl:
     provider: openai
     model: qwen-vl-plus-latest
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+
+
+  qwen3-audio:
+    provider: openai
+    model: qwen3-asr-flash
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key_env: DASHSCOPE_API_KEY
 
@@ -87,9 +95,13 @@ models:
     api_key_env: DEEPSEEK_API_KEY
 
 # 默认使用的模型（对应上面的 key）
-default: qwen-plus
+default: qwen3
+
 # 摘要/上下文优化使用的轻量模型（对应上面的 key）
 summary_model: qwen-turbo
+
+# 多模态预处理模型（用于将音频/图片/视频转为纯文本，对应上面的 key）
+multimodal_model: qwen-vl
 
 # Ollama 配置（自动发现本地模型时使用）
 ollama:

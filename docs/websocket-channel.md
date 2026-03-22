@@ -153,6 +153,8 @@ ws.onmessage = (event) => {
 
 发送用户文本消息给大模型处理。位置信息（经纬度）直接组合到 `text` 字段中，无需单独的 `location` 字段。
 
+媒体字段（`image`、`audio`、`video`）统一使用 **列表格式**，每个列表项包含 `type` 和 `data` 字段，支持同时传递多个同类型媒体。
+
 **格式：**
 
 ```json
@@ -160,15 +162,17 @@ ws.onmessage = (event) => {
   "id": "unique-message-id",
   "type": "user",
   "text": "用户输入的文本内容",
-  "image": "/path/to/image.png",     // 可选：图片本地路径
-  "audio": "/path/to/audio.wav",     // 可选：音频本地路径
-  "video": "/path/to/video.mp4",     // 可选：视频本地路径
-  "image_b64": "base64-encoded...",  // 可选：图片 Base64 数据（与 image 二选一）
-  "image_mime": "image/png",         // 可选：配合 image_b64 使用，默认 image/png
-  "audio_b64": "base64-encoded...",  // 可选：音频 Base64 数据（与 audio 二选一）
-  "audio_format": "wav",             // 可选：配合 audio_b64 使用，默认 wav
-  "video_b64": "base64-encoded...",  // 可选：视频 Base64 数据（与 video 二选一）
-  "video_mime": "video/mp4"          // 可选：配合 video_b64 使用，默认 video/mp4
+  "image": [                                    // 可选：图片列表
+    {"type": "file", "data": "/path/1.jpg"},
+    {"type": "url", "data": "https://..."}
+  ],
+  "audio": [                                    // 可选：音频列表
+    {"type": "file", "data": "/path/audio.wav"},
+    {"type": "base64", "data": "...", "mime": "audio/wav"}
+  ],
+  "video": [                                    // 可选：视频列表
+    {"type": "url", "data": "https://...mp4"}
+  ]
 }
 ```
 
@@ -178,18 +182,22 @@ ws.onmessage = (event) => {
 |------|------|------|------|
 | `id` | string | ✅ | 消息唯一 ID，建议使用 UUID v4。服务端的响应会携带相同的 `id`，用于关联请求和响应 |
 | `type` | string | ✅ | 固定值 `"user"` |
-| `text` | string | ✅ | 用户消息文本。如果包含位置信息，将经纬度直接组合到此字段中（见下方示例） |
-| `image` | string | ❌ | 图片本地文件路径 |
-| `audio` | string | ❌ | 音频本地文件路径 |
-| `video` | string | ❌ | 视频本地文件路径 |
-| `image_b64` | string | ❌ | 图片 Base64 编码数据（与 `image` 二选一，`image_b64` 优先级更高） |
-| `image_mime` | string | ❌ | 配合 `image_b64` 使用，指定 MIME 类型，默认 `image/png` |
-| `audio_b64` | string | ❌ | 音频 Base64 编码数据（与 `audio` 二选一，`audio_b64` 优先级更高） |
-| `audio_format` | string | ❌ | 配合 `audio_b64` 使用，指定音频格式，默认 `wav` |
-| `video_b64` | string | ❌ | 视频 Base64 编码数据（与 `video` 二选一，`video_b64` 优先级更高） |
-| `video_mime` | string | ❌ | 配合 `video_b64` 使用，指定 MIME 类型，默认 `video/mp4` |
+| `text` | string | ❌ | 用户消息文本。如果包含位置信息，将经纬度直接组合到此字段中（见下方示例） |
+| `image` | array | ❌ | 图片列表，每项为 `{type, data}` 对象 |
+| `audio` | array | ❌ | 音频列表，每项为 `{type, data}` 对象 |
+| `video` | array | ❌ | 视频列表，每项为 `{type, data}` 对象 |
 
-> 💡 **路径 vs Base64**：对于本地技能（如 Telegram Bot、飞书机器人），推荐使用文件路径；对于 Web 前端等无法直接访问本地文件的场景，使用 Base64 编码传输。同时提供路径和 Base64 时，Base64 优先。
+**媒体项格式：**
+
+每个媒体项为一个 JSON 对象，包含以下字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `type` | string | ✅ | 数据类型：`"file"`（本地文件路径）、`"url"`（URL 链接）、`"base64"`（Base64 编码数据） |
+| `data` | string | ✅ | 对应类型的数据内容 |
+| `mime` | string | ❌ | MIME 类型，仅 `type="base64"` 时使用（如 `"audio/wav"`、`"image/png"`），文件类型会自动推断 |
+
+> 💡 **何时用哪种 type**：对于本地技能（如 Telegram Bot、飞书机器人），推荐使用 `"file"` 类型传文件路径；对于 Web 前端等无法直接访问本地文件的场景，使用 `"base64"` 类型传 Base64 编码数据；对于网络资源，使用 `"url"` 类型直接传链接。
 
 **普通文本消息示例：**
 
@@ -220,8 +228,9 @@ ws.onmessage = (event) => {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "type": "user",
   "text": "请分析这张图片",
-  "image_b64": "iVBORw0KGgoAAAANSUhEUg...",
-  "image_mime": "image/png"
+  "image": [
+    {"type": "base64", "data": "iVBORw0KGgoAAAANSUhEUg...", "mime": "image/png"}
+  ]
 }
 ```
 
@@ -231,9 +240,9 @@ ws.onmessage = (event) => {
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "type": "user",
-  "text": "",
-  "audio_b64": "UklGRiQAAABXQVZFZm10...",
-  "audio_format": "wav"
+  "audio": [
+    {"type": "base64", "data": "UklGRiQAAABXQVZFZm10...", "mime": "audio/wav"}
+  ]
 }
 ```
 

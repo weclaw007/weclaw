@@ -28,30 +28,7 @@ from weclaw.utils.paths import get_checkpoint_db_path
 logger = logging.getLogger(__name__)
 
 
-def base64_encode(path: str | Path) -> str:
-    """读取文件并返回 base64 文本。"""
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
 
-
-def get_mime_type(path: str | Path) -> str:
-    """根据扩展名推断 MIME 类型。"""
-    ext = Path(path).suffix.lower().lstrip(".")
-    if ext in ("jpg", "jpeg"):
-        return "image/jpeg"
-    if ext == "png":
-        return "image/png"
-    if ext == "gif":
-        return "image/gif"
-    if ext == "bmp":
-        return "image/bmp"
-    if ext == "wav":
-        return "audio/wav"
-    if ext == "mp3":
-        return "audio/mpeg"
-    if ext == "mp4":
-        return "video/mp4"
-    return "application/octet-stream"
 
 
 # 导入统一的命令执行工具
@@ -396,90 +373,16 @@ class Agent:
             logger.warning(f"归档 ToolMessage 失败: {e}")
 
     def _build_content(self, input_content: Union[str, Dict[str, Any]]) -> list[dict[str, Any]]:
-        """将文本/多模态输入转换为模型所需 content 结构。
+        """将纯文本输入转换为模型所需 content 结构。
 
-        支持两种方式传入多模态数据：
-        1. 本地文件路径：image/audio/video 字段，值为文件路径
-        2. Base64 编码数据：image_b64/audio_b64/video_b64 字段，值为 base64 字符串
-           - 使用 b64 字段时，可通过 image_mime/audio_format/video_mime 指定格式
+        注意：多媒体数据（图片/音频/视频）已在 media_processor 中预处理为纯文本，
+        此方法只需处理文本字段。
         """
         if isinstance(input_content, str):
             return [{"type": "text", "text": input_content}]
 
-        content: list[dict[str, Any]] = [{"type": "text", "text": input_content.get("text", "")}]
-
-        # --- 图片处理 ---
-        self._add_media_content(
-            content, input_content,
-            b64_key="image_b64", path_key="image", mime_key="image_mime",
-            default_mime="image/png", content_type="image_url",
-            builder=lambda uri: {"type": "image_url", "image_url": {"url": uri}},
-            label="图片",
-        )
-
-        # --- 音频处理 ---
-        self._add_media_content(
-            content, input_content,
-            b64_key="audio_b64", path_key="audio", mime_key="audio_format",
-            default_mime="wav", content_type="input_audio",
-            builder=lambda uri, fmt=None: {
-                "type": "input_audio",
-                "input_audio": {"data": uri, "format": fmt or "wav"},
-            },
-            label="音频", use_format=True,
-        )
-
-        # --- 视频处理 ---
-        self._add_media_content(
-            content, input_content,
-            b64_key="video_b64", path_key="video", mime_key="video_mime",
-            default_mime="video/mp4", content_type="video_url",
-            builder=lambda uri: {"type": "video_url", "video_url": {"url": uri}},
-            label="视频",
-        )
-
-        return content
-
-    @staticmethod
-    def _add_media_content(
-        content: list[dict[str, Any]],
-        input_content: Dict[str, Any],
-        *,
-        b64_key: str,
-        path_key: str,
-        mime_key: str,
-        default_mime: str,
-        content_type: str,
-        builder,
-        label: str,
-        use_format: bool = False,
-    ) -> None:
-        """通用多媒体内容处理：支持 base64 数据或本地文件路径。"""
-        b64_data = input_content.get(b64_key)
-        file_path = input_content.get(path_key)
-
-        if b64_data:
-            try:
-                mime_or_fmt = input_content.get(mime_key, default_mime)
-                if use_format:
-                    data_uri = f"data:;base64,{b64_data}"
-                    content.append(builder(data_uri, mime_or_fmt))
-                else:
-                    data_uri = f"data:{mime_or_fmt};base64,{b64_data}"
-                    content.append(builder(data_uri))
-            except Exception as e:
-                logger.exception(f"处理{label} base64 数据失败: {e}")
-        elif file_path and Path(file_path).exists():
-            try:
-                if use_format:
-                    data_uri = f"data:;base64,{base64_encode(file_path)}"
-                    fmt = Path(file_path).suffix.lower().lstrip(".") or default_mime
-                    content.append(builder(data_uri, fmt))
-                else:
-                    data_uri = f"data:{get_mime_type(file_path)};base64,{base64_encode(file_path)}"
-                    content.append(builder(data_uri))
-            except Exception as e:
-                logger.exception(f"处理{label}失败: {e}")
+        text = input_content.get("text", "")
+        return [{"type": "text", "text": text}] if text else []
 
     async def astream_text(
         self,
@@ -548,6 +451,8 @@ class Agent:
             logger.exception(f"Error while streaming from agent: {e}")
             return
 
+
+
 async def main():
     """测试用例：创建 Agent，支持控制台多轮会话"""
     from dotenv import load_dotenv, find_dotenv
@@ -568,7 +473,7 @@ async def main():
     system_prompt = build_system_prompt(skill_manager)
 
     async with Agent() as agent:
-        await agent.init(system_prompt=system_prompt, model_name="qwen-vl", request_timeout=10000)
+        await agent.init(system_prompt=system_prompt, model_name="qwen3", request_timeout=10000)
         print("=" * 50)
         print("多轮对话测试（输入 exit/quit 退出，Ctrl+C 中断）")
         print("=" * 50)

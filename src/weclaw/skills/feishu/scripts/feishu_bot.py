@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import ssl
+import tempfile
 import uuid
 import threading
 import websockets
@@ -290,6 +291,110 @@ class FeishuBot:
             logger.exception(f"发送图片消息异常: {e}")
             return False
 
+    def _download_audio_resource(self, feishu_message_id: str, file_key: str) -> str | None:
+        """从飞书下载音频资源到本地临时文件
+
+        Args:
+            feishu_message_id: 飞书消息 ID
+            file_key: 音频文件的 file_key
+
+        Returns:
+            本地临时文件路径，下载失败返回 None
+        """
+        try:
+            request = GetMessageResourceRequest.builder() \
+                .message_id(feishu_message_id) \
+                .file_key(file_key) \
+                .type("file") \
+                .build()
+
+            response = self.lark_client.im.v1.message_resource.get(request)
+
+            if not response.success():
+                logger.error(
+                    f"下载音频资源失败: code={response.code}, msg={response.msg}, "
+                    f"log_id={response.get_log_id()}"
+                )
+                return None
+
+            # 将音频数据写入临时文件
+            # 飞书音频消息格式为 opus，保存为 .opus 后缀
+            tmp_dir = os.path.join(tempfile.gettempdir(), "feishu_audio")
+            os.makedirs(tmp_dir, exist_ok=True)
+            tmp_path = os.path.join(tmp_dir, f"{file_key}.opus")
+
+            with open(tmp_path, "wb") as f:
+                f.write(response.file.read())
+
+            logger.info(f"音频资源已下载: {feishu_message_id}/{file_key} -> {tmp_path}")
+            return tmp_path
+
+        except Exception as e:
+            logger.exception(f"下载音频资源异常: {e}")
+            return None
+
+    def _handle_audio_message(self, chat_id: str, feishu_message_id: str, content: dict) -> None:
+        """处理音频消息
+
+        从飞书下载音频文件，通过 WebSocket 以文件路径方式发送给大模型进行语音识别。
+
+        Args:
+            chat_id: 飞书会话 ID
+            feishu_message_id: 飞书消息 ID（用于下载资源）
+            content: 飞书音频消息内容，格式如 {"file_key": "..."}
+        """
+        # 停止状态下不处理消息
+        if self._stopped:
+            self._send_feishu_reply(chat_id, "机器人已停止，发送 /start 重新启动。")
+            return
+
+        file_key = content.get("file_key", "")
+        if not file_key:
+            logger.error(f"音频消息缺少 file_key: {content}")
+            self._send_feishu_reply(chat_id, "无法解析语音消息。")
+            return
+
+        # 下载音频文件
+        audio_path = self._download_audio_resource(feishu_message_id, file_key)
+        if not audio_path:
+            self._send_feishu_reply(chat_id, "语音消息下载失败，请稍后再试。")
+            return
+
+        # 检查 WebSocket 连接
+        if not self.websocket:
+            self._send_feishu_reply(chat_id, "抱歉，服务暂时不可用，请稍后再试。")
+            return
+
+        try:
+            # 生成唯一消息 ID
+            message_id = str(uuid.uuid4())
+
+            # 保存映射
+            self._message_map[message_id] = feishu_message_id
+            self._chat_map[message_id] = chat_id
+
+            # 构建消息，audio 字段使用列表格式
+            request = build_user_message(
+                message_id,
+                "",
+                audio=[{"type": "file", "data": audio_path}]
+            )
+
+            # 发送到 WebSocket
+            if self._loop and self.websocket:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.websocket.send(json.dumps(request, ensure_ascii=False)),
+                    self._loop
+                )
+                future.result(timeout=30)  # 语音文件较大，超时时间适当延长
+                logger.info(f"已发送语音消息到 WebSocket [{message_id}]: {audio_path}")
+            else:
+                logger.error("WebSocket 连接不可用")
+                self._send_feishu_reply(chat_id, "抱歉，服务暂时不可用，请稍后再试。")
+
+        except Exception as e:
+            logger.exception(f"发送语音消息到 WebSocket 失败: {e}")
+
     async def _reply_tool_message(self, message_id: str, status: str, **kwargs) -> None:
         """通过 WebSocket 回复工具消息结果给大模型
 
@@ -396,9 +501,14 @@ class FeishuBot:
                 self._handle_location_message(chat_id, content)
                 return
 
-            # 除位置消息外，目前只处理文本消息
+            # 处理音频消息
+            if msg_type == "audio":
+                self._handle_audio_message(chat_id, message.message_id, content)
+                return
+
+            # 除位置消息和音频消息外，目前只处理文本消息
             if msg_type != "text":
-                self._send_feishu_reply(chat_id, "暂时只支持文本消息和位置消息哦~")
+                self._send_feishu_reply(chat_id, "暂时只支持文本消息、语音消息和位置消息哦~")
                 return
 
             text = content.get("text", "").strip()

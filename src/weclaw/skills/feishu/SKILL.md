@@ -8,7 +8,7 @@ metadata:
       {
         "emoji": "🐦",
         "primaryEnv": "LARK_APP_ID",
-        "requires": { "bins": ["python", "python3"] }
+        "requires": { "bins": ["python", "python3"], "env": ["LARK_APP_ID", "LARK_APP_SECRET"] },
       },
   }
 ---
