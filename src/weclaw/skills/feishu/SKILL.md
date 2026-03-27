@@ -58,16 +58,13 @@ Use this skill to start and manage Feishu (Lark) bot, send messages through Feis
 
 ## Quick Start
 
-```bash
-# Prefer python3, fallback to python
-PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
-PYTHONW_CMD=$(command -v pythonw3 >/dev/null 2>&1 && echo pythonw || echo pythonw)
+飞书适配器已集成到主程序中，通过 `FeishuAdapter` 启动：
 
-# Run Feishu interaction script (non-blocking on Windows)
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-    $PYTHONW_CMD scripts/feishu_bot.py
-else
-    # On Unix-like systems, use background process
-    $PYTHON_CMD scripts/feishu_bot.py &
-fi
+```bash
+# 设置环境变量
+export LARK_APP_ID="your_app_id"
+export LARK_APP_SECRET="your_app_secret"
+
+# 启动飞书适配器
+weclaw start --adapter feishu
 ```

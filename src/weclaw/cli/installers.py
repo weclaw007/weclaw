@@ -20,8 +20,7 @@ from weclaw.utils.console import (
 
 
 def run_powershell_command(command: str, description: str = "") -> tuple[bool, str]:
-    """
-    执行PowerShell命令
+    """执行PowerShell命令
 
     Args:
         command: PowerShell命令字符串
@@ -38,7 +37,7 @@ def run_powershell_command(command: str, description: str = "") -> tuple[bool, s
             ["powershell", "-Command", command],
             capture_output=True,
             text=True,
-            timeout=300  # 5分钟超时
+            timeout=300,
         )
 
         if result.returncode == 0:
@@ -61,14 +60,12 @@ def install_chocolatey() -> bool:
     """静默安装Chocolatey"""
     print_section("开始静默安装 Chocolatey")
 
-    # 1. 设置执行策略
     print_step("1. 设置 PowerShell 执行策略...")
     execution_policy_cmd = "Set-ExecutionPolicy Bypass -Scope Process -Force"
     success, _ = run_powershell_command(execution_policy_cmd, "设置执行策略")
     if not success:
         return False
 
-    # 2. 设置安全协议
     print_step("2. 设置安全协议...")
     security_protocol_cmd = """
     [System.Net.ServicePointManager]::SecurityProtocol = 
@@ -78,7 +75,6 @@ def install_chocolatey() -> bool:
     if not success:
         return False
 
-    # 3. 下载并执行安装脚本
     print_step("3. 下载并执行 Chocolatey 安装脚本...")
     install_cmd = """
     iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
@@ -104,8 +100,8 @@ def install_homebrew() -> bool:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=600,  # 10分钟超时
-            env={**subprocess.os.environ, "NONINTERACTIVE": "1"}  # 非交互模式
+            timeout=600,
+            env={**subprocess.os.environ, "NONINTERACTIVE": "1"},
         )
 
         if result.returncode == 0:
@@ -131,7 +127,7 @@ def install_uv() -> bool:
             [sys.executable, "-m", "pip", "install", "uv"],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
         )
 
         if result.returncode == 0:
@@ -158,24 +154,17 @@ def install_node() -> bool:
         if current_os == "darwin":
             result = subprocess.run(
                 ["brew", "install", "node"],
-                capture_output=True,
-                text=True,
-                timeout=600
+                capture_output=True, text=True, timeout=600,
             )
         elif current_os == "windows":
             result = subprocess.run(
                 ["choco", "install", "nodejs", "-y"],
-                capture_output=True,
-                text=True,
-                timeout=600
+                capture_output=True, text=True, timeout=600,
             )
         else:
-            # Linux: 使用 apt 或其他包管理器
             result = subprocess.run(
                 ["sudo", "apt", "install", "-y", "nodejs", "npm"],
-                capture_output=True,
-                text=True,
-                timeout=600
+                capture_output=True, text=True, timeout=600,
             )
 
         if result.returncode == 0:
@@ -202,24 +191,17 @@ def install_go() -> bool:
         if current_os == "darwin":
             result = subprocess.run(
                 ["brew", "install", "go"],
-                capture_output=True,
-                text=True,
-                timeout=600
+                capture_output=True, text=True, timeout=600,
             )
         elif current_os == "windows":
             result = subprocess.run(
                 ["choco", "install", "golang", "-y"],
-                capture_output=True,
-                text=True,
-                timeout=600
+                capture_output=True, text=True, timeout=600,
             )
         else:
-            # Linux: 使用 apt
             result = subprocess.run(
                 ["sudo", "apt", "install", "-y", "golang"],
-                capture_output=True,
-                text=True,
-                timeout=600
+                capture_output=True, text=True, timeout=600,
             )
 
         if result.returncode == 0:

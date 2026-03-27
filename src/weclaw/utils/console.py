@@ -23,44 +23,31 @@ def print_section(title: str) -> None:
 
 
 def print_success(msg: str) -> None:
-    """打印绿色成功消息"""
     print(f"  {GREEN}✔ {msg}{RESET}")
 
 
 def print_fail(msg: str) -> None:
-    """打印红色失败消息"""
     print(f"  {RED}✘ {msg}{RESET}")
 
 
 def print_info(msg: str) -> None:
-    """打印青色信息消息"""
     print(f"  {CYAN}ℹ {msg}{RESET}")
 
 
 def print_warn(msg: str) -> None:
-    """打印黄色警告消息"""
     print(f"  {YELLOW}⚠ {msg}{RESET}")
 
 
 def print_detail(msg: str) -> None:
-    """打印灰色缩进的细节信息"""
     print(f"    {DIM}{msg}{RESET}")
 
 
 def print_step(msg: str) -> None:
-    """打印步骤信息"""
     print(f"  {CYAN}→{RESET} {msg}")
 
 
 def format_duration(seconds: float) -> str:
-    """格式化耗时显示
-
-    Args:
-        seconds: 秒数
-
-    Returns:
-        格式化后的时间字符串，如 "120ms"、"3.2s"、"2m30s"
-    """
+    """格式化耗时显示"""
     if seconds < 1:
         return f"{seconds * 1000:.0f}ms"
     elif seconds < 60:

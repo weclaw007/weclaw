@@ -1,12 +1,17 @@
-"""技能管理 - 安装/卸载/状态检查模块"""
+"""技能管理 - 安装/卸载/状态检查模块
+
+v2 变更：
+- 从 agent/skill_operations.py 迁移到 skills/operations.py
+- 适配 v2 command.run() 返回 CommandResult（dataclass，.ok 属性）
+"""
 
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any
 
-from weclaw.utils.command import run_command, check_bins_exist
+from weclaw.utils.command import run, check_bins_exist
 
 
 def _filter_install_list(install_list: list[dict], current_platform: str) -> list[dict]:
@@ -31,62 +36,38 @@ def _filter_install_list(install_list: list[dict], current_platform: str) -> lis
 
 async def _run_install_command(command: str) -> dict[str, Any]:
     """执行安装/卸载命令并返回标准化结果。"""
-    result = await run_command(command)
+    result = await run(command)
     return {
-        "success": result["returncode"] == 0,
-        "output": result.get("stdout", ""),
-        "error": result.get("stderr") if result["returncode"] != 0 else None
+        "success": result.ok,
+        "output": result.stdout or "",
+        "error": result.stderr if not result.ok else None,
     }
 
 
-async def _simple_install(install_item: dict[str, Any], pkg_field: str, cmd_template: str) -> dict[str, Any]:
-    """通用简单安装：从 install_item 读取包名，填入命令模板执行。
+async def _run_pkg_command(install_item: dict[str, Any], pkg_field: str, cmd_template: str) -> dict[str, Any]:
+    """通用包管理命令：从 install_item 读取包名，填入命令模板执行。
 
-    Args:
-        install_item: 安装配置项
-        pkg_field: 包名字段（如 "package"、"formula"）
-        cmd_template: 命令模板，{pkg} 会被替换为实际包名
+    同时用于安装和卸载场景。
     """
     package = install_item.get(pkg_field, "")
     if not package:
         return {"success": False, "error": f"缺少 {pkg_field} 字段"}
-
     try:
         return await _run_install_command(cmd_template.format(pkg=package))
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-async def _simple_uninstall(install_item: dict[str, Any], pkg_field: str, cmd_template: str) -> dict[str, Any]:
-    """通用简单卸载：从 install_item 读取包名，填入命令模板执行。
-
-    Args:
-        install_item: 安装配置项
-        pkg_field: 包名字段
-        cmd_template: 命令模板，{pkg} 会被替换为实际包名
-    """
-    package = install_item.get(pkg_field, "")
-    if not package:
-        return {"success": False, "error": f"缺少 {pkg_field} 字段"}
-
-    try:
-        return await _run_install_command(cmd_template.format(pkg=package))
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
+# ============================================================
+# 状态检查
+# ============================================================
 
 async def check_skills_installed(skill_metadata: dict[str, Any]) -> bool:
-    """
-    检查指定的技能是否已安装。
+    """检查指定的技能是否已安装。
 
-    参数：
-        skill_metadata: 技能的 front_matter 元数据对象
-
-    判断 openclaw.requires.bins 中要求的二进制文件是否存在于 PATH 中（或安装类型对应的额外目录中），
+    判断 openclaw.requires.bins 中要求的二进制文件是否存在于 PATH 中，
     以及 openclaw.requires.env 中要求的环境变量是否已设置。
     如果没有定义 requires，则视为已安装（无外部依赖）。
-
-    返回：True（已安装）或 False（未安装）
     """
     if not skill_metadata:
         return False
@@ -122,11 +103,10 @@ async def check_skills_installed(skill_metadata: dict[str, Any]) -> bool:
 # ============================================================
 
 async def install_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """
-    安装指定的技能。
+    """安装指定的技能。
 
     参数：
-        skill_metadata_map: {skill_name: front_matter} 字典，包含需要安装的技能及其元数据
+        skill_metadata_map: {skill_name: front_matter} 字典
 
     返回结构：
     {
@@ -137,11 +117,7 @@ async def install_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dict[
     }
     """
     if not skill_metadata_map:
-        return {
-            "success": False,
-            "skill_names": [],
-            "error": "未提供技能信息"
-        }
+        return {"success": False, "skill_names": [], "error": "未提供技能信息"}
 
     install_results = []
     all_success = True
@@ -152,24 +128,21 @@ async def install_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dict[
         required_os = openclaw.get("os", [])
 
         if required_os and sys.platform not in required_os:
-            result = {
+            install_results.append({
                 "skill_name": skill_name,
                 "success": False,
-                "error": f"技能 '{skill_name}' 要求操作系统 {required_os}，但当前系统为 {sys.platform}"
-            }
-            install_results.append(result)
+                "error": f"技能 '{skill_name}' 要求操作系统 {required_os}，但当前系统为 {sys.platform}",
+            })
             all_success = False
             continue
 
         install_list = openclaw.get("install", [])
-
         if not install_list:
-            result = {
+            install_results.append({
                 "skill_name": skill_name,
                 "success": False,
-                "error": f"技能 '{skill_name}' 没有定义 openclaw.install 安装方法"
-            }
-            install_results.append(result)
+                "error": f"技能 '{skill_name}' 没有定义 openclaw.install 安装方法",
+            })
             all_success = False
             continue
 
@@ -177,12 +150,11 @@ async def install_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dict[
         filtered_install_list = _filter_install_list(install_list, current_platform)
 
         if not filtered_install_list:
-            result = {
+            install_results.append({
                 "skill_name": skill_name,
                 "success": False,
-                "error": f"技能 '{skill_name}' 在当前操作系统 {current_platform} 下没有可用的安装方法"
-            }
-            install_results.append(result)
+                "error": f"技能 '{skill_name}' 在当前操作系统 {current_platform} 下没有可用的安装方法",
+            })
             all_success = False
             continue
 
@@ -193,27 +165,23 @@ async def install_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dict[
         for install_item in filtered_install_list:
             install_id = install_item.get("id", "unknown")
             kind = install_item.get("kind", "")
-
             result = await _execute_install(skill_name, install_item)
             install_methods.append({
                 "id": install_id,
                 "kind": kind,
                 "status": "success" if result["success"] else "failed",
                 "output": result.get("output", ""),
-                "error": result.get("error")
+                "error": result.get("error"),
             })
-
             if not result["success"]:
                 skill_success = False
 
-        result = {
+        install_results.append({
             "skill_name": skill_name,
             "success": skill_success,
             "install_methods": install_methods,
-            "error": None if skill_success else "部分或全部安装方法执行失败"
-        }
-        install_results.append(result)
-
+            "error": None if skill_success else "部分或全部安装方法执行失败",
+        })
         if not skill_success:
             all_success = False
 
@@ -221,7 +189,7 @@ async def install_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dict[
         "success": all_success,
         "skill_names": list(skill_metadata_map.keys()),
         "install_results": install_results,
-        "error": None if all_success else "部分或全部技能安装失败"
+        "error": None if all_success else "部分或全部技能安装失败",
     }
 
 
@@ -232,16 +200,13 @@ async def _execute_install(skill_name: str, install_item: dict[str, Any]) -> dic
 
     logging.info(f"正在执行安装: {label} (kind={kind})")
 
-    # 收集额外的搜索目录（用于某些安装方式二进制不在 PATH 中的情况）
+    # 收集额外的搜索目录
     extra_dirs = await _get_extra_bin_dirs(kind)
 
     # 检查是否已安装
     bins = install_item.get("bins", [])
     if bins and await check_bins_exist(bins, extra_dirs=extra_dirs):
-        return {
-            "success": True,
-            "output": f"已安装 (bins: {', '.join(bins)} 已存在)"
-        }
+        return {"success": True, "output": f"已安装 (bins: {', '.join(bins)} 已存在)"}
 
     if kind == "brew":
         result = await _install_brew(install_item)
@@ -258,12 +223,9 @@ async def _execute_install(skill_name: str, install_item: dict[str, Any]) -> dic
     elif kind == "pip":
         result = await _install_pip(install_item)
     else:
-        return {
-            "success": False,
-            "error": f"不支持的安装类型: {kind}"
-        }
+        return {"success": False, "error": f"不支持的安装类型: {kind}"}
 
-    # 安装后二次验证：确认二进制文件是否真正可用
+    # 安装后二次验证
     if result.get("success") and bins:
         extra_dirs = await _get_extra_bin_dirs(kind)
         if not await check_bins_exist(bins, extra_dirs=extra_dirs):
@@ -286,17 +248,19 @@ async def _get_extra_bin_dirs(kind: str) -> list[str]:
     return extra_dirs
 
 
+# ============================================================
+# 各类安装器
+# ============================================================
+
 async def _install_brew(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 Homebrew 安装"""
     formula = install_item.get("formula", "")
     if not formula:
         return {"success": False, "error": "缺少 formula 字段"}
-
     try:
         if "/" in formula:
             tap_name = "/".join(formula.split("/")[:2])
-            await run_command(f"brew tap {tap_name}")
-
+            await run(f"brew tap {tap_name}")
         return await _run_install_command(f"brew install {formula}")
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -309,45 +273,30 @@ async def _install_go(install_item: dict[str, Any]) -> dict[str, Any]:
         return {"success": False, "error": "缺少 module 字段"}
 
     try:
-        result = await run_command(f"go install {module}")
-        if result["returncode"] != 0:
-            return {
-                "success": False,
-                "output": result.get("stdout", ""),
-                "error": result.get("stderr")
-            }
+        result = await run(f"go install {module}")
+        if not result.ok:
+            return {"success": False, "output": result.stdout, "error": result.stderr}
 
         # go install 成功后，验证二进制文件是否真正可用
         bins = install_item.get("bins", [])
         if bins:
-            # 获取 GOBIN 或 GOPATH/bin 路径
             gobin = await _get_go_bin_dir()
             if gobin:
-                # 检查二进制文件是否存在于 go bin 目录
-                all_found = True
-                for bin_name in bins:
-                    bin_path = Path(gobin) / bin_name
-                    if not bin_path.exists():
-                        all_found = False
-                        break
-
+                all_found = all((Path(gobin) / b).exists() for b in bins)
                 if all_found:
-                    # 检查 go bin 目录是否在 PATH 中
                     path_dirs = os.environ.get("PATH", "").split(os.pathsep)
                     if gobin not in path_dirs:
                         return {
                             "success": True,
-                            "output": f"安装成功，二进制文件位于 {gobin}\n"
-                                     f"⚠️  注意：{gobin} 不在 PATH 中，请将以下内容添加到 shell 配置文件中：\n"
-                                     f"   export PATH=\"$PATH:{gobin}\"",
-                            "error": None
+                            "output": (
+                                f"安装成功，二进制文件位于 {gobin}\n"
+                                f"⚠️  注意：{gobin} 不在 PATH 中，请将以下内容添加到 shell 配置文件中：\n"
+                                f'   export PATH="$PATH:{gobin}"'
+                            ),
+                            "error": None,
                         }
 
-        return {
-            "success": True,
-            "output": result.get("stdout", ""),
-            "error": None
-        }
+        return {"success": True, "output": result.stdout, "error": None}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -355,17 +304,15 @@ async def _install_go(install_item: dict[str, Any]) -> dict[str, Any]:
 async def _get_go_bin_dir() -> str | None:
     """获取 Go 的 bin 目录路径（GOBIN 或 GOPATH/bin）"""
     try:
-        # 优先使用 GOBIN
-        result = await run_command("go env GOBIN", capture=True)
-        if result["returncode"] == 0:
-            gobin = result.get("stdout", "").strip()
+        result = await run("go env GOBIN")
+        if result.ok:
+            gobin = result.stdout.strip()
             if gobin:
                 return gobin
 
-        # 回退到 GOPATH/bin
-        result = await run_command("go env GOPATH", capture=True)
-        if result["returncode"] == 0:
-            gopath = result.get("stdout", "").strip()
+        result = await run("go env GOPATH")
+        if result.ok:
+            gopath = result.stdout.strip()
             if gopath:
                 return str(Path(gopath) / "bin")
     except Exception:
@@ -384,20 +331,18 @@ async def _install_choco(install_item: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _install_apt(install_item: dict[str, Any]) -> dict[str, Any]:
-    """通过 APT (Advanced Package Tool) 安装"""
+    """通过 APT 安装"""
     package = install_item.get("package", "")
     if not package:
         return {"success": False, "error": "缺少 package 字段"}
-
     try:
-        update_result = await run_command("sudo apt update")
-        if update_result["returncode"] != 0:
+        update_result = await run("sudo apt update")
+        if not update_result.ok:
             return {
                 "success": False,
-                "output": update_result.get("stdout", ""),
-                "error": f"包列表更新失败: {update_result.get('stderr', '未知错误')}"
+                "output": update_result.stdout,
+                "error": f"包列表更新失败: {update_result.stderr or '未知错误'}",
             }
-
         return await _run_install_command(f"sudo apt install {package} -y")
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -418,7 +363,6 @@ async def _install_node(install_item: dict[str, Any]) -> dict[str, Any]:
         else:
             global_flag = "-g" if is_global else ""
             command = f"npm install {package} {global_flag}"
-
         return await _run_install_command(command)
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -429,7 +373,6 @@ async def _install_pip(install_item: dict[str, Any]) -> dict[str, Any]:
     package = install_item.get("package", "")
     if not package:
         return {"success": False, "error": "缺少 package 字段"}
-
     try:
         user_flag = "--user" if install_item.get("global", False) else ""
         pip_command = install_item.get("pip_command", "pip")
@@ -443,11 +386,10 @@ async def _install_pip(install_item: dict[str, Any]) -> dict[str, Any]:
 # ============================================================
 
 async def uninstall_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """
-    卸载指定的技能，根据技能的安装类型执行相应的卸载命令。
+    """卸载指定的技能。
 
     参数：
-        skill_metadata_map: {skill_name: front_matter} 字典，包含需要卸载的技能及其元数据
+        skill_metadata_map: {skill_name: front_matter} 字典
 
     返回结构：
     {
@@ -458,27 +400,21 @@ async def uninstall_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dic
     }
     """
     if not skill_metadata_map:
-        return {
-            "success": False,
-            "skill_names": [],
-            "error": "未提供技能信息"
-        }
+        return {"success": False, "skill_names": [], "error": "未提供技能信息"}
 
     uninstall_results = []
     all_success = True
 
     for skill_name, metadata in skill_metadata_map.items():
-        # 获取技能的安装配置
         openclaw = metadata.get("metadata", {}).get("openclaw", {})
         install_list = openclaw.get("install", [])
 
         if not install_list:
-            result = {
+            uninstall_results.append({
                 "skill_name": skill_name,
                 "success": False,
-                "error": f"技能 '{skill_name}' 没有定义 openclaw.install 安装方法，无法确定如何卸载"
-            }
-            uninstall_results.append(result)
+                "error": f"技能 '{skill_name}' 没有定义 openclaw.install 安装方法，无法确定如何卸载",
+            })
             all_success = False
             continue
 
@@ -486,43 +422,37 @@ async def uninstall_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dic
         filtered_install_list = _filter_install_list(install_list, current_platform)
 
         if not filtered_install_list:
-            result = {
+            uninstall_results.append({
                 "skill_name": skill_name,
                 "success": False,
-                "error": f"技能 '{skill_name}' 在当前操作系统 {current_platform} 下没有可用的卸载方法"
-            }
-            uninstall_results.append(result)
+                "error": f"技能 '{skill_name}' 在当前操作系统 {current_platform} 下没有可用的卸载方法",
+            })
             all_success = False
             continue
 
-        # 执行过滤后的卸载方法
         uninstall_methods = []
         skill_success = True
 
         for install_item in filtered_install_list:
             install_id = install_item.get("id", "unknown")
             kind = install_item.get("kind", "")
-
             result = await _execute_uninstall(skill_name, install_item)
             uninstall_methods.append({
                 "id": install_id,
                 "kind": kind,
                 "status": "success" if result["success"] else "failed",
                 "output": result.get("output", ""),
-                "error": result.get("error")
+                "error": result.get("error"),
             })
-
             if not result["success"]:
                 skill_success = False
 
-        result = {
+        uninstall_results.append({
             "skill_name": skill_name,
             "success": skill_success,
             "uninstall_methods": uninstall_methods,
-            "error": None if skill_success else "部分或全部卸载方法执行失败"
-        }
-        uninstall_results.append(result)
-
+            "error": None if skill_success else "部分或全部卸载方法执行失败",
+        })
         if not skill_success:
             all_success = False
 
@@ -530,7 +460,7 @@ async def uninstall_skills(skill_metadata_map: dict[str, dict[str, Any]]) -> dic
         "success": all_success,
         "skill_names": list(skill_metadata_map.keys()),
         "uninstall_results": uninstall_results,
-        "error": None if all_success else "部分或全部技能卸载失败"
+        "error": None if all_success else "部分或全部技能卸载失败",
     }
 
 
@@ -556,11 +486,12 @@ async def _execute_uninstall(skill_name: str, install_item: dict[str, Any]) -> d
     elif kind == "pip":
         return await _uninstall_pip(install_item)
     else:
-        return {
-            "success": False,
-            "error": f"不支持的卸载类型: {kind}"
-        }
+        return {"success": False, "error": f"不支持的卸载类型: {kind}"}
 
+
+# ============================================================
+# 各类卸载器
+# ============================================================
 
 async def _uninstall_brew(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 Homebrew 卸载"""
@@ -569,16 +500,13 @@ async def _uninstall_brew(install_item: dict[str, Any]) -> dict[str, Any]:
 
 async def _uninstall_go(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过删除二进制文件卸载 Go 模块"""
-    import shutil
-
-    # 优先通过 bins 字段查找并删除二进制文件
     bins = install_item.get("bins", [])
     if bins:
         deleted = []
         for bin_name in bins:
-            result = await run_command(f"which {bin_name}")
-            if result["returncode"] == 0:
-                bin_path = result.get("stdout", "").strip()
+            result = await run(f"which {bin_name}")
+            if result.ok:
+                bin_path = result.stdout.strip()
                 if bin_path and Path(bin_path).exists():
                     Path(bin_path).unlink()
                     deleted.append(bin_path)
@@ -586,7 +514,6 @@ async def _uninstall_go(install_item: dict[str, Any]) -> dict[str, Any]:
             return {"success": True, "output": f"已删除: {', '.join(deleted)}"}
         return {"success": False, "error": f"未找到二进制文件: {bins}"}
 
-    # 回退到 go list 查找（去除 @version 后缀）
     module = install_item.get("module", "")
     if not module:
         return {"success": False, "error": "缺少 module 和 bins 字段"}
@@ -594,13 +521,12 @@ async def _uninstall_go(install_item: dict[str, Any]) -> dict[str, Any]:
     module_path = module.split("@")[0] if "@" in module else module
 
     try:
-        result = await run_command(f"go list -f '{{{{.Target}}}}' {module_path}")
-        if result["returncode"] == 0:
-            install_path = result.get("stdout", "").strip()
+        result = await run(f"go list -f '{{{{.Target}}}}' {module_path}")
+        if result.ok:
+            install_path = result.stdout.strip()
             if install_path and Path(install_path).exists():
                 Path(install_path).unlink()
                 return {"success": True, "output": f"已删除 {install_path}"}
-
         return {"success": False, "error": "无法找到或删除 Go 模块"}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -618,7 +544,7 @@ async def _uninstall_choco(install_item: dict[str, Any]) -> dict[str, Any]:
 
 async def _uninstall_apt(install_item: dict[str, Any]) -> dict[str, Any]:
     """通过 APT 卸载"""
-    return await _simple_uninstall(install_item, "package", "sudo apt remove {pkg} -y")
+    return await _run_pkg_command(install_item, "package", "sudo apt remove {pkg} -y")
 
 
 async def _uninstall_node(install_item: dict[str, Any]) -> dict[str, Any]:
@@ -636,7 +562,6 @@ async def _uninstall_node(install_item: dict[str, Any]) -> dict[str, Any]:
         else:
             global_flag = "-g" if is_global else ""
             command = f"npm uninstall {package} {global_flag}"
-
         return await _run_install_command(command)
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -647,7 +572,6 @@ async def _uninstall_pip(install_item: dict[str, Any]) -> dict[str, Any]:
     package = install_item.get("package", "")
     if not package:
         return {"success": False, "error": "缺少 package 字段"}
-
     try:
         user_flag = "--user" if install_item.get("global", False) else ""
         pip_command = install_item.get("pip_command", "pip")

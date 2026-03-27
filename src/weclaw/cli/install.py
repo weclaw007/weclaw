@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-import asyncio
-import sys
-import time
-from pathlib import Path
-
 """
 Claw 安装脚本
 
@@ -14,10 +9,15 @@ Claw 安装脚本
   claw install     # 通过 claw 命令行执行安装
 """
 
+import asyncio
+import sys
+import time
+from pathlib import Path
+
 import platform
 
-from weclaw.agent.skill_manager import SkillManager
-from weclaw.agent.skill_operations import install_skills, check_skills_installed
+from weclaw.skill_mgr.manager import SkillManager
+from weclaw.skill_mgr.operations import install_skills, check_skills_installed
 from weclaw.utils.console import (
     BOLD, RESET,
     print_section, print_success, print_fail,
@@ -28,7 +28,7 @@ from weclaw.utils.paths import get_third_party_skills_dir
 
 def is_windows():
     """检查当前操作系统是否为Windows"""
-    return platform.system().lower() == 'windows'
+    return platform.system().lower() == "windows"
 
 
 async def install_main():
@@ -111,7 +111,6 @@ async def install_main():
         if result.get("install_results"):
             skill_result = result["install_results"][0]
 
-            # 打印每个安装方法的详细信息
             for method in skill_result.get("install_methods", []):
                 method_id = method.get("id", "unknown")
                 kind = method.get("kind", "unknown")
@@ -124,7 +123,6 @@ async def install_main():
                 else:
                     print_fail(f"[{kind}] {method_id} - 安装失败")
 
-                # 打印输出详情（截取前5行避免过长）
                 detail_text = output or (error if error else "")
                 if detail_text:
                     detail_lines = detail_text.splitlines()
@@ -162,5 +160,4 @@ async def install_main():
 
 
 if __name__ == "__main__":
-    # 启动asyncio事件循环，统一调度所有异步任务
     asyncio.run(install_main())

@@ -20,16 +20,12 @@ Use this skill to start and manage Telegram bot, send messages through Telegram 
 
 ## Quick Start
 
-```bash
-# Prefer python3, fallback to python
-PYTHON_CMD=$(command -v python3 >/dev/null 2>&1 && echo python3 || echo python)
-PYTHONW_CMD=$(command -v pythonw3 >/dev/null 2>&1 && echo pythonw || echo pythonw)
+Telegram 适配器已集成到主程序中，通过 `TelegramAdapter` 启动：
 
-# Run Telegram interaction script (non-blocking on Windows)
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
-    $PYTHONW_CMD scripts/telegram_bot.py
-else
-    # On Unix-like systems, use background process
-    $PYTHON_CMD scripts/telegram_bot.py &
-fi
+```bash
+# 设置环境变量
+export TELEGRAM_BOT_TOKEN="your_bot_token"
+
+# 启动 Telegram 适配器
+weclaw start --adapter telegram
 ```

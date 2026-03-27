@@ -97,9 +97,6 @@ models:
 # 默认使用的模型（对应上面的 key）
 default: qwen3
 
-# 摘要/上下文优化使用的轻量模型（对应上面的 key）
-summary_model: qwen-turbo
-
 # 多模态预处理模型（按媒体类型分别配置，对应上面的 key）
 # 同一类型的多媒体使用同一个模型处理，不同类型使用各自最适合的模型
 multimodal_model:

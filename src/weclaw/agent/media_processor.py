@@ -1,5 +1,4 @@
-"""
-媒体预处理模块：将音频、图片、视频等多媒体输入通过多模态模型转换为纯文本。
+"""媒体预处理模块：将音频、图片、视频等多媒体输入通过多模态模型转换为纯文本。
 
 架构思路：
   前端消息（含媒体） → media_processor（多模态模型提取文本） → Agent（纯文本处理）
@@ -11,6 +10,8 @@ import base64
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from langchain_core.messages import HumanMessage
 
 from weclaw.utils.model_registry import ModelRegistry
 
@@ -65,20 +66,11 @@ def _get_mime_type(path: str | Path) -> str:
         "bmp": "image/bmp", "webp": "image/webp",
         "wav": "audio/wav", "mp3": "audio/mpeg",
         "ogg": "audio/ogg", "flac": "audio/flac",
+        "opus": "audio/opus",
         "mp4": "video/mp4", "avi": "video/x-msvideo",
         "mov": "video/quicktime", "webm": "video/webm",
     }
     return mime_map.get(ext, "application/octet-stream")
-
-
-def _get_audio_format(mime_or_ext: str) -> str:
-    """将 MIME 类型或扩展名统一为短格式名（wav/mp3/…）。"""
-    if "/" in mime_or_ext:
-        fmt = mime_or_ext.split("/")[-1]
-        if fmt == "mpeg":
-            return "mp3"
-        return fmt
-    return mime_or_ext
 
 
 def _has_media(input_content: Dict[str, Any]) -> bool:
@@ -94,7 +86,6 @@ def _resolve_media_item(item: Dict[str, str]) -> tuple[Optional[str], Optional[s
     """解析单个媒体项，返回 (data_uri_or_url, source_type)。
 
     item 格式: {"type": "file|url|base64", "data": "..."}
-    返回: (可用于协议的 URI/URL 字符串, 类型标识) 或 (None, None)
     """
     item_type = item.get("type", "")
     data = item.get("data", "")
@@ -113,11 +104,8 @@ def _resolve_media_item(item: Dict[str, str]) -> tuple[Optional[str], Optional[s
             logger.warning(f"Media file not found: {data}")
             return None, None
     elif item_type == "base64":
-        # base64 类型需要额外提供 mime，或从 data 头部推断
-        # 如果 data 已经带有 data:xxx;base64, 前缀则直接使用
         if data.startswith("data:"):
             return data, "base64"
-        # 否则默认以 application/octet-stream 包装
         mime = item.get("mime", "application/octet-stream")
         return f"data:{mime};base64,{data}", "base64"
     else:
@@ -145,16 +133,15 @@ def _build_image_content(input_content: Dict[str, Any]) -> Optional[list[dict]]:
     user_text = input_content.get("text", "")
     prompt = _IMAGE_PROMPT
     if user_text:
-        prompt += f"\n\nThe user also said: \"{user_text}\". Take this into account in your description."
+        prompt += f'\n\nThe user also said: "{user_text}". Take this into account in your description.'
 
     return [{"type": "text", "text": prompt}] + content_parts
 
 
 def _build_audio_content(input_content: Dict[str, Any]) -> Optional[list[dict]]:
-    """构建音频的多模态 content 数组，支持多个音频。
+    """构建音频的多模态 content 数组。
 
-    注意：音频识别不能包含文本内容，否则会导致参数错误，
-    因此只返回纯音频 content，不附加 prompt 文本。
+    注意：音频识别不能包含文本内容，否则会导致参数错误。
     """
     items = input_content.get("audio")
     if not isinstance(items, list) or len(items) == 0:
@@ -173,7 +160,7 @@ def _build_audio_content(input_content: Dict[str, Any]) -> Optional[list[dict]]:
 
 
 def _build_video_content(input_content: Dict[str, Any]) -> Optional[list[dict]]:
-    """构建视频的多模态 content 数组，支持多个视频。"""
+    """构建视频的多模态 content 数组。"""
     items = input_content.get("video")
     if not isinstance(items, list) or len(items) == 0:
         return None
@@ -190,27 +177,24 @@ def _build_video_content(input_content: Dict[str, Any]) -> Optional[list[dict]]:
     user_text = input_content.get("text", "")
     prompt = _VIDEO_PROMPT
     if user_text:
-        prompt += f"\n\nThe user also said: \"{user_text}\". Take this into account in your description."
+        prompt += f'\n\nThe user also said: "{user_text}". Take this into account in your description.'
 
     return [{"type": "text", "text": prompt}] + content_parts
 
 
 # ── 公开接口 ────────────────────────────────────────────────
 
-async def process_media(
-    input_content: Dict[str, Any],
-) -> str:
+async def process_media(input_content: Dict[str, Any]) -> str:
     """将包含媒体的输入通过多模态模型预处理为纯文本描述。
 
     处理流程：
-    1. 检测 input_content 中是否包含 image/audio/video（base64 或文件路径）
+    1. 检测 input_content 中是否包含 image/audio/video
     2. 如果没有媒体字段，直接返回原始 text
-    3. 针对不同媒体类型，从 models.yaml 中读取各自配置的专属模型分别处理
-    4. 同一类型的多个媒体项使用同一个模型实例
-    5. 将所有文本描述合并返回
+    3. 针对不同媒体类型，从 models.yaml 中读取专属模型分别处理
+    4. 将所有文本描述合并返回
 
     Args:
-        input_content: 前端发送的消息 dict，可能包含 text/image/audio/video 等字段
+        input_content: 消息 dict，可能包含 text/image/audio/video 等字段
 
     Returns:
         纯文本字符串，可直接交给 Agent 处理
@@ -220,24 +204,18 @@ async def process_media(
 
     text = input_content.get("text", "")
 
-    # 没有媒体数据，直接返回文本
     if not _has_media(input_content):
         return text
 
     registry = ModelRegistry.get_instance()
 
-    # 每种媒体类型对应的 content 构建器
     builders = [
         ("audio", _build_audio_content),
         ("image", _build_image_content),
         ("video", _build_video_content),
     ]
 
-    from langchain_core.messages import HumanMessage
-
-    # 缓存已创建的模型实例，相同模型名复用同一实例
-    _model_cache: Dict[str, Any] = {}
-
+    _model_cache: dict[str, Any] = {}
     parts = []
     if text:
         parts.append(text)
@@ -247,12 +225,10 @@ async def process_media(
         if content is None:
             continue
 
-        # 从配置文件中按媒体类型获取对应的模型
         model_name = registry.get_multimodal_model(media_type)
         if not model_name:
             logger.warning(f"No model configured for {media_type}, falling back to default model")
 
-        # 复用已创建的模型实例（相同模型名不重复创建）
         cache_key = model_name or "__default__"
         if cache_key not in _model_cache:
             _model_cache[cache_key] = registry.create_chat_model(

@@ -1,3 +1,3 @@
-"""weclaw - AI Agent with MCP skills"""
+"""WeClaw - AI Assistant with Skills (v2, DeepAgents)"""
 
 __version__ = "0.1.0"

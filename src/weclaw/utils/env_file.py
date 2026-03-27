@@ -1,7 +1,5 @@
-"""环境变量文件读写工具
+"""环境变量文件读写工具"""
 
-从 Client 类中提取的 .env 文件操作函数，便于跨模块复用。
-"""
 from pathlib import Path
 
 
@@ -38,7 +36,6 @@ def save_env_to_file(env_path: str, env_name: str, api_key: str) -> None:
         with open(env_file, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
-        # 查找并替换已有的同名变量
         for i, line in enumerate(lines):
             stripped = line.strip()
             if stripped.startswith(f"{env_name}=") or stripped.startswith(f"{env_name} ="):
@@ -47,7 +44,6 @@ def save_env_to_file(env_path: str, env_name: str, api_key: str) -> None:
                 break
 
     if not found:
-        # 追加新的环境变量
         if lines and not lines[-1].endswith("\n"):
             lines.append("\n")
         lines.append(f"{env_name}={api_key}\n")
